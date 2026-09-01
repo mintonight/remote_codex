@@ -1,6 +1,6 @@
 # 实施状态
 
-更新日期：2026-08-05
+更新日期：2026-08-31
 
 ## 能力边界复核
 
@@ -575,6 +575,15 @@ transport 的远程 `pwd` 仍通过。真实模型的 Core 本地诱饵执行、
   关闭；旧 v2 描述符仅按 Bridge 私有 upstream token 的精确命令行匹配迁移。定向自动化
   覆盖活动 Shim、死亡 Shim、PID 复用、身份不可读、v2 迁移和非 Linux 边界；真实窗口
   重载与 thread 恢复仍按根 README TODO 验收。
+- 2026-08-31 增加 Linux x64 GitHub Actions 自构建工作流。它只在 Ubuntu x64 原生 runner
+  执行 `npm ci`、完整 `npm run check` 和 `package:stage`，上传 Controller、匹配 Executor
+  及带文件大小和 SHA-256 的 stage 清单；Actions 固定到已核对提交，权限只有
+  `contents: read`。隔离安装的 Codex npm 包仅为无 VS Code 扩展的 CI runner 提供真实
+  app-server 冒烟运行时，不改变产品运行时发现或形成版本门禁。该实现不创建 Release、
+  不生成 Windows 产物，也不放宽既有双平台发布门禁。本地 Node.js 24 与隔离
+  `@openai/codex@0.152.0` 环境下，`npm run check` 为 83 个测试文件通过、1 个条件文件
+  跳过，438 项通过、8 项跳过、0 失败，Shim 冒烟、Linux 构包和 stage 完成；工作流另经
+  `actionlint 1.7.12` 校验。首次 GitHub 托管 runner 结果仍按根 README TODO 验收。
 
 活动实施项及其退出条件统一保存在根 `README.md` 最末尾的 `TODO` 中；本节只保留已完成
 的能力探针结论。

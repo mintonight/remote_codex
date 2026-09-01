@@ -299,6 +299,16 @@ npm run package:collect -- <linux-stage-dir> <windows-stage-dir>
 npm run package:verify
 ```
 
+仓库同时提供 `.github/workflows/build-linux-vsix.yml`，在 `main` 推送、面向 `main` 的
+Pull Request、`v*` 标签和手动触发时使用 GitHub 托管的 Ubuntu x64 runner。工作流固定
+Node.js 与仅供 Shim 冒烟使用的 Codex npm 运行时，执行完整 `npm run check`，再生成带
+大小和 SHA-256 清单的 Linux stage，并上传为 Actions artifact。该运行时版本只属于 CI
+测试夹具，不参与 Controller、Shim 或 Executor 的运行时接纳。
+
+当前自动化只负责 Linux x64 自构建，不创建 GitHub Release，也不伪造 Windows 产物。
+正式双平台发布仍必须补齐 Windows 原生 stage，并执行上面的 `package:collect` 与
+`package:verify`。
+
 跨平台构包只能证明包内容，不能替代对应平台的 Extension Host、Shim、官方任务和
 Remote SSH 实机验证。完整门禁和量化指标见
 [升级跟进](https://github.com/RaraAlu/remote_codex/blob/main/docs/upgrade-tracking.md)。
@@ -403,6 +413,15 @@ Remote SSH 实机验证。完整门禁和量化指标见
   `localExecution="allow"`、`local-full-access` 和 `fullLocalAccess.accessible=true`，同时
   回归远端命令仍在远端主根执行。该模式明确接受最大本机权限风险，不再以根外拒绝、撤销
   或本机 Core 阻断作为安全保证。
+
+### Linux GitHub Actions 自构建
+
+- 将本提交推送到 GitHub 后，观察 `Build Linux x64 VSIX` 的首次真实运行；退出条件是
+  `ubuntu-24.04` job 完整通过 `npm ci`、自动化测试零失败、Node SEA 构建、Shim 冒烟、
+  Linux Controller/Executor 构包和 `package:stage`，并记录通过项与跳过项数量；下载的
+  artifact 只包含当前 `linux-x64` Controller、匹配 Executor 与 `manifest.json`，且文件
+  大小和 SHA-256 与清单一致。完成前只声明工作流源码与本地等价命令通过，不声明 GitHub
+  runner 已验收。
 
 ### Windows x64 与 0.4.0
 
