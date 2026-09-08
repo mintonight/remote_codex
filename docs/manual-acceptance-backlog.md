@@ -345,6 +345,17 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M02 项目根、附件与 Core 本地诱饵
 
+- 待恢复与补测（2026-09-08）：用户确认 Explorer 与系统文件管理器拖放均完全无响应。
+  当前 VS Code `1.136.1` 的 Workbench 没有受管补丁，原厂 product checksum 匹配；
+  官方扩展 `26.5901.22334` 的 Webview 补丁及备份 SHA-256 匹配。最新激活记录另有
+  Workbench 兼容检查锁超时。现有补丁能够匹配当前两端资产并生成语法有效的 JavaScript，
+  但这不证明实机恢复。先通过 `Codex Bridge: Enable Native Codex Drop Surface`
+  重新启用，由用户完成系统授权及窗口重载，再分别从 Explorer、系统文件管理器拖入
+  文件和目录各至少 3 次，核对完整捕获序列、唯一原生 `@`、turn 可读取和再次重载回归。
+  单独验证仅含 `data:` URI 的图片拖放是否应交回官方入口，并确认日志不记录图片载荷；
+  它在升级前已有拒绝记录，不能归因为本次 VS Code 升级。证据见
+  [本次升级复核](acceptance/2026-09-08-release-0.3.79-drop-recheck.md)。
+
 - 待修复（2026-08-31）：VS Code `1.135.0`、官方扩展 `26.5825.51511`、Bridge
   `0.3.79` 的本地窗口重载后，用户确认拖放添加再次失效。Bridge 激活日志显示
   `layout.integration result=already-repaired`，但拖动时没有新增
