@@ -33,6 +33,11 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Install desktop entry test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y desktop-file-utils
+
       - name: Install project dependencies
         run: npm ci
 

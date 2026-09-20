@@ -7,13 +7,14 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, join } from "node:path";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { AuditLog } from "../core/audit-log.js";
 import { chmodIfSupported } from "../core/file-permissions.js";
-import { loadLocalWorkspaceContext } from "../core/local-workspace-context.js";
+import { loadLocalWorkspaceContext, readLocalWorkspaceContext } from "../core/local-workspace-context.js";
 import {
   bridgeExternalCliDir,
   bridgeExternalCliSessionPath,
@@ -53,6 +54,11 @@ import {
   type RpcMessage,
 } from "./rpc.js";
 import type { ToolRouteInventory } from "./tool-routing.js";
+import { ThreadLifecycleIndex } from "./thread-lifecycle.js";
+import { cleanupStaleOfficialAppServers } from "../extension/stale-app-server-cleanup.js";
+import { claimAppServerHandoff, type AppServerHandoff } from "./app-server-handoff.js";
+import { ThreadSubscriptionRecovery } from "./thread-recovery.js";
+import { ServiceRequests } from "./service-requests.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const EXTERNAL_TOKEN_ENV = "CODEX_BRIDGE_EXTERNAL_SESSION_TOKEN";
@@ -87,10 +93,14 @@ interface ExternalTurnInterruptSummary {
 }
 
 export interface ExternalCliSessionDescriptor {
+  codexHome?: string;
+  serviceScope?: "user";
+  serviceKey?: string;
   version: 1 | 2 | 3;
   appServer?: ProcessIdentity;
   endpoint: string;
   executablePath?: string;
+  executableFileId?: string;
   host: string;
   pid: number;
   startedAtMs: number;
@@ -98,6 +108,10 @@ export interface ExternalCliSessionDescriptor {
   tokenPath: string;
   workspaceRoot: string;
   threadId?: string;
+  loadedThreadIds?: string[];
+  lifecycle?: "starting" | "ready" | "stopping" | "detached" | "failed";
+  upstreamEndpoint?: string;
+  retainUntilMs?: number;
 }
 
 export interface SharedAppServerOptions {
@@ -115,6 +129,10 @@ export interface SharedAppServerOptions {
   extensionHostPid?: number;
   toolRouteInventory?: ToolRouteInventory;
   runtimeStatusPath?: string;
+  persistentSession?: boolean;
+  serviceKey?: string;
+  workspaceContextTimeoutMs?: number;
+  serviceScope?: "user";
   spawnCodex?: (
     command: string,
     args: readonly string[],
@@ -205,14 +223,22 @@ export function withSharedWebSocketTransport(
 
 function webSocketWriter(socket: WebSocket): RpcMessageWriter {
   return (message) => {
+    if (socket.bufferedAmount > 16 * 1024 * 1024) {
+      socket.close(1013, "Slow client; reconnect to recover state");
+      return;
+    }
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(message));
     }
   };
 }
 
-function streamWriter(stream: Writable): RpcMessageWriter {
+function streamWriter(stream: Writable, onStalled: () => void): RpcMessageWriter {
   return (message) => {
+    if (stream.destroyed || stream.writableLength > 16 * 1024 * 1024) {
+      onStalled();
+      return;
+    }
     stream.write(`${JSON.stringify(message)}\n`);
   };
 }
@@ -238,7 +264,26 @@ export class SharedAppServer {
     }
   })();
   readonly #startedAtMs = currentProcessStartedAtMs();
-  #activeThreadId: string | undefined;
+  readonly #threads = new ThreadLifecycleIndex();
+  readonly #upstreams = new Set<WebSocket>();
+  readonly #serviceRequests = new ServiceRequests();
+  #serviceIdleConfirmed = false;
+  #selfIdentity: ProcessIdentity | undefined;
+  readonly #activeThreads = new Map<string, string>();
+  readonly #orphanedClients = new Map<string, { upstream: WebSocket; session: ShimProxy; pending: Map<RpcId, PendingExternalRequest> }>();
+  #refreshSubscriptions: (() => void) | undefined;
+  #lifecycle: "starting" | "ready" | "stopping" | "detached" | "failed" = "starting";
+  #detached = false;
+  #ready = false;
+  #persistentSession = false;
+  #ownsState = false;
+  #pendingHandoff: AppServerHandoff | null = null;
+  #resolveStopped: () => void = () => undefined;
+  readonly #stopped = new Promise<void>((resolvePromise) => { this.#resolveStopped = resolvePromise; });
+  #stopping = false;
+  #closeTask: Promise<void> | undefined;
+  #stopChildTask: Promise<boolean> | undefined;
+  #childExited: Promise<number> | undefined;
   #activeWorkspaceRoot: string;
   #appServerIdentity: ProcessIdentity | null = null;
   #child: ChildProcessWithoutNullStreams | null = null;
@@ -260,6 +305,7 @@ export class SharedAppServer {
 
   constructor(options: SharedAppServerOptions) {
     this.#options = options;
+    this.#persistentSession = options.persistentSession ?? false;
     this.#audit = new AuditLog(options.auditPath);
     this.#vscodeInitialized = new Promise<void>((resolvePromise) => {
       this.#resolveVsCodeInitialized = resolvePromise;
@@ -274,6 +320,98 @@ export class SharedAppServer {
   async run(): Promise<number> {
     const input = this.#options.input ?? process.stdin;
     const output = this.#options.output ?? process.stdout;
+    const stop = (): void => this.#requestStop();
+    input.once("end", stop);
+    input.once("close", stop);
+    input.once("error", stop);
+    output.once("error", stop);
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    const ownerPid = this.#options.extensionHostPid;
+    const ownerMonitor = ownerPid ? setInterval(() => {
+      try { process.kill(ownerPid, 0); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") stop();
+      }
+    }, 1_000) : undefined;
+    ownerMonitor?.unref();
+    let idleSince = Date.now();
+    const serviceMonitor = this.#options.serviceKey ? setInterval(() => {
+      for (const [id, client] of this.#orphanedClients) {
+        if (client.upstream.readyState === WebSocket.CLOSED ||
+            (this.#activeThreads.size === 0 && client.pending.size === 0 && !this.#serviceRequests.has(id))) {
+          client.session.closeSession();
+          client.upstream.close();
+          this.#serviceRequests.remove(id);
+          this.#orphanedClients.delete(id);
+        }
+      }
+      // Loaded/unknown work is retained conservatively. Never infer idleness
+      // from the lack of a foreground window or from an elapsed turn timeout.
+      if (!this.#serviceIdleConfirmed || this.#externalServer?.clients.size || this.#threads.loaded.size || this.#orphanedClients.size) idleSince = Date.now();
+      else if (this.#ready && Date.now() - idleSince > 30 * 60_000) stop();
+    }, 1_000) : undefined;
+    try {
+      if (input.destroyed || input.readableEnded) return 0;
+      await this.#resolveStartupWorkspace();
+      this.#selfIdentity = (await inspectProcessIdentities([process.pid])).get(process.pid);
+      const cleanup = this.#persistentSession ? null : await cleanupStaleOfficialAppServers();
+      if (cleanup && cleanup.staleCount > 0) {
+        await this.#audit.write({
+          operation: "app_server.stale_cleanup",
+          outcome: cleanup.failedPids.length ? "failed" : "succeeded",
+          details: { ...cleanup, phase: "before-spawn" },
+        });
+      }
+      if (this.#stopping) return 0;
+      return await this.#runOwned();
+    } catch (error) {
+      if (this.#stopping) return 0;
+      throw error;
+    } finally {
+      if (ownerMonitor) clearInterval(ownerMonitor);
+      if (serviceMonitor) clearInterval(serviceMonitor);
+      try { await this.#close(); }
+      finally {
+        await this.#pendingHandoff?.release(false);
+        this.#pendingHandoff = null;
+        input.off("end", stop);
+        input.off("close", stop);
+        input.off("error", stop);
+        output.off("error", stop);
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
+    }
+  }
+
+  async #resolveStartupWorkspace(): Promise<void> {
+    if (!this.#persistentSession || this.#options.config) return;
+    const path = this.#options.localWorkspaceContextPath;
+    if (!path) {
+      // A launcher's cwd is not evidence of the open VS Code workspace.
+      if (!this.#options.localWorkspaceRoot) this.#persistentSession = false;
+      return;
+    }
+    const deadline = Date.now() + (this.#options.workspaceContextTimeoutMs ?? 5_000);
+    do {
+      if (this.#stopping) return;
+      const context = await readLocalWorkspaceContext(path);
+      if (context) {
+        if (context.workspaceRoot === null) this.#persistentSession = false;
+        else this.#activeWorkspaceRoot = context.workspaceRoot;
+        await this.#audit.write({ operation: "app_server.workspace_resolved", outcome: "succeeded",
+          details: { source: "extension-host-context", workspaceRoot: context.workspaceRoot, persistentSession: this.#persistentSession } });
+        return;
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    } while (Date.now() < deadline);
+    throw new Error("VS Code workspace context is not ready; refusing to start a competing app-server");
+  }
+
+  async #runOwned(): Promise<number> {
+    const input = this.#options.input ?? process.stdin;
+    const output = this.#options.output ?? process.stdout;
     const errorOutput = this.#options.errorOutput ?? process.stderr;
     const spawnCodex = this.#options.spawnCodex ?? spawn;
     const directory = bridgeExternalCliDir();
@@ -285,34 +423,57 @@ export class SharedAppServer {
       errorOutput.write(`codex-bridge: unable to record Shim runtime status: ${String(error)}\n`);
     }
 
-    this.#upstreamToken = randomBytes(32).toString("base64url");
+    const handoff = this.#persistentSession
+      ? await claimAppServerHandoff(directory, this.#options.config?.host ?? "local", this.#activeWorkspaceRoot, this.#options.serviceKey)
+      : null;
+    this.#pendingHandoff = handoff;
+    this.#upstreamToken = handoff?.token ?? randomBytes(32).toString("base64url");
     this.#externalToken = randomBytes(32).toString("base64url");
+    this.#ownsState = true;
     await writeFile(this.#upstreamTokenPath, this.#upstreamToken, { mode: 0o600 });
     await writeFile(this.#externalTokenPath, this.#externalToken, { mode: 0o600 });
     await chmodIfSupported(this.#upstreamTokenPath, 0o600);
     await chmodIfSupported(this.#externalTokenPath, 0o600);
 
-    const upstreamPort = await reserveLoopbackPort();
-    this.#upstreamEndpoint = `ws://${LOOPBACK_HOST}:${upstreamPort}`;
+    this.#upstreamEndpoint = handoff?.endpoint ?? `ws://${LOOPBACK_HOST}:${await reserveLoopbackPort()}`;
     const appServerArgs = withSharedWebSocketTransport(
       this.#options.appServerArgs,
       this.#upstreamEndpoint,
       this.#upstreamTokenPath,
     );
+    if (this.#stopping) return 0;
+    if (handoff) {
+      this.#appServerIdentity = handoff.appServer;
+    } else {
     const child = spawnCodex(this.#options.codexExecutable, appServerArgs, {
       cwd: this.#options.appServerCwd ?? this.#options.controlDir,
       env: process.env,
       stdio: "pipe",
     });
     this.#child = child;
+    this.#childExited = new Promise<number>((resolvePromise) => {
+      child.once("exit", (code, signal) => resolvePromise(signal ? 128 : (code ?? 1)));
+      child.once("error", () => resolvePromise(1));
+    });
     this.#appServerIdentity = await this.#inspectAppServerIdentity(child);
     child.stderr.pipe(errorOutput, { end: false });
     child.stdout.pipe(errorOutput, { end: false });
+    }
 
     let exitCode: number | null = null;
     let runtimeError: string | null = null;
     try {
+      if (this.#stopping) return 0;
+      // Publish recovery identity before initialization, not just after a UI handshake.
+      const externalPort = await this.#startExternalServer(errorOutput);
+      await this.#writeDescriptor(`ws://${LOOPBACK_HOST}:${externalPort}`);
       const upstream = await this.#connectUpstream();
+      if (handoff) {
+        await handoff.release(true);
+        this.#pendingHandoff = null;
+        await this.#audit.write({ operation: "app_server.handoff", outcome: "succeeded",
+          details: { appServerPid: handoff.appServer.pid } });
+      }
       const stdioClient = this.#runStdioClient(upstream, input, output, errorOutput);
       const startup = await Promise.race([
         this.#vscodeInitialized.then(() => ({ initialized: true as const })),
@@ -322,7 +483,8 @@ export class SharedAppServer {
         exitCode = startup.code;
         return exitCode;
       }
-      const externalPort = await this.#startExternalServer(errorOutput);
+      this.#lifecycle = "ready";
+      this.#ready = true;
       await this.#writeDescriptor(`ws://${LOOPBACK_HOST}:${externalPort}`);
       await this.#audit.write({
         operation: "external_cli.gateway",
@@ -411,6 +573,7 @@ export class SharedAppServer {
     const deadline = Date.now() + 10_000;
     let lastError: unknown;
     while (Date.now() < deadline) {
+      if (this.#stopping) throw new Error("Bridge app-server is stopping");
       try {
         return await new Promise<WebSocket>((resolvePromise, reject) => {
           const socket = new WebSocket(this.#upstreamEndpoint, {
@@ -422,6 +585,8 @@ export class SharedAppServer {
           }, 1_000);
           socket.once("open", () => {
             clearTimeout(timer);
+            this.#upstreams.add(socket);
+            socket.once("close", () => this.#upstreams.delete(socket));
             resolvePromise(socket);
           });
           socket.once("error", (error) => {
@@ -441,14 +606,16 @@ export class SharedAppServer {
     const server = new WebSocketServer({
       host: LOOPBACK_HOST,
       port: 0,
+      maxPayload: 16 * 1024 * 1024,
       verifyClient: ({ req }, done) => {
         const token = bearerToken(req.headers.authorization);
-        done(secretMatches(token, this.#externalToken), 401, "Unauthorized");
+        done(!req.headers.origin && this.#lifecycle === "ready" && secretMatches(token, this.#externalToken), 401, "Unauthorized");
       },
     });
     this.#externalServer = server;
-    server.on("connection", (socket) => {
-      void this.#serveExternalClient(socket, errorOutput);
+    server.on("connection", (socket, request) => {
+      void this.#serveExternalClient(socket, errorOutput,
+        Boolean(this.#options.serviceKey && request.headers["x-codex-bridge-client"] === "vscode"));
     });
     await new Promise<void>((resolvePromise, reject) => {
       server.once("listening", resolvePromise);
@@ -461,20 +628,22 @@ export class SharedAppServer {
     return address.port;
   }
 
-  async #serveExternalClient(socket: WebSocket, errorOutput: Writable): Promise<void> {
+  async #serveExternalClient(socket: WebSocket, errorOutput: Writable, vscode = false): Promise<void> {
     const clientId = randomUUID();
     const clientIdentity: BridgeClientIdentity = {
       clientId,
-      clientSource: "external-cli",
+      clientSource: vscode ? "vscode" : "external-cli",
     };
     const buffered: string[] = [];
     const pendingClientRequests = new Map<RpcId, PendingClientRequest>();
     const pendingExternalRequests = new Map<RpcId, PendingExternalRequest>();
     let closed = false;
+    socket.on("error", () => socket.terminate());
     socket.once("close", () => {
       closed = true;
     });
     const bufferMessage = (data: RawData): void => {
+      if (buffered.length >= 256) { socket.close(1009, "Initialization backlog exceeded"); return; }
       buffered.push(rawMessage(data));
     };
     socket.on("message", bufferMessage);
@@ -482,6 +651,10 @@ export class SharedAppServer {
     let session: ShimProxy | null = null;
     try {
       upstream = await this.#connectUpstream();
+      upstream.once("close", () => {
+        this.#serviceRequests.remove(clientId);
+        socket.close(1012, "Native connection closed; reconnect to recover state");
+      });
       if (closed) {
         upstream.close();
         return;
@@ -489,11 +662,14 @@ export class SharedAppServer {
       session = this.#createSession(true, 1, clientIdentity);
       const writeUpstream = webSocketWriter(upstream);
       const writeExternalTransport = webSocketWriter(socket);
+      let initialized = false;
+      let replayed = false;
       const writeExternal: RpcMessageWriter = (message) => {
         if (isRpcResponse(message)) {
           const pending = pendingExternalRequests.get(message.id);
           if (pending) {
             pendingExternalRequests.delete(message.id);
+            if (pending.details.method === "initialize" && !message.error) initialized = true;
             void this.#queueAudit({
               ...clientIdentity,
               operationId: pending.operationId,
@@ -507,13 +683,43 @@ export class SharedAppServer {
           }
         }
         writeExternalTransport(message);
+        if (isRpcResponse(message) && initialized && !closed) {
+          this.#externalWriters.set(clientId, writeExternal);
+          if (this.#options.serviceKey && !replayed) {
+            replayed = true;
+            this.#serviceRequests.replay(writeExternal);
+          }
+        }
       };
-      this.#externalWriters.set(clientId, writeExternal);
       this.#externalRelayCounts.set(clientId, 0);
-      const writeClient = this.#downstreamWriter(clientId, writeExternal);
+      const downstream = this.#downstreamWriter(clientId, writeExternal);
+      const writeClient: RpcMessageWriter = (message) => {
+        if (this.#options.serviceKey && isRpcRequest(message)) {
+          this.#serviceRequests.publish(clientId, message, writeUpstream, (request) => {
+            for (const writer of this.#externalWriters.values()) writer(request);
+          });
+        } else downstream(message);
+      };
       const handleClient = (raw: string): void => {
         try {
           const message = parseRpcLine(raw);
+          if (this.#options.serviceKey && this.#serviceRequests.respond(message)) return;
+          if (this.#options.serviceKey && initialized && isRpcRequest(message) &&
+              ["bridge/service/status", "bridge/service/stop"].includes(message.method)) {
+            const busy = !this.#serviceIdleConfirmed || this.#threads.loaded.size > 0 || this.#orphanedClients.size > 0 ||
+              this.#externalWriters.size > 1 || pendingExternalRequests.size > 0;
+            if (message.method === "bridge/service/stop" && busy) {
+              writeExternal({ id: message.id, error: { code: -32000, message: "Service still has clients, loaded threads or unconfirmed work; refusing shutdown" } });
+            } else {
+              writeExternal({ id: message.id, result: { pid: process.pid, appServerPid: this.#appServerIdentity?.pid,
+                clients: this.#externalWriters.size, activeThreads: [...this.#activeThreads.keys()], loadedThreads: [...this.#threads.loaded], canStop: !busy } });
+              if (message.method === "bridge/service/stop") setTimeout(() => this.#requestStop(), 25);
+            }
+            return;
+          }
+          if (this.#options.serviceKey && "method" in message && message.method === "initialized") {
+            this.#refreshSubscriptions?.();
+          }
           const externalMcpInitialize = this.#isExternalMcpInitialize(message);
           this.#observeClientMessage(
             message,
@@ -584,16 +790,6 @@ export class SharedAppServer {
           socket.close(1003, "Invalid JSON-RPC");
         }
       };
-      socket.off("message", bufferMessage);
-      socket.on("message", (data) => handleClient(rawMessage(data)));
-      await this.#queueAudit({
-        ...clientIdentity,
-        operationId: clientId,
-        operation: "external_cli.connect",
-        outcome: "succeeded",
-        hostId: this.#options.config?.host ?? "local",
-        workspaceRoot: this.#activeWorkspaceRoot,
-      });
       upstream.on("message", (data) => {
         try {
           const message = parseRpcLine(rawMessage(data));
@@ -610,10 +806,16 @@ export class SharedAppServer {
           upstream?.close();
         }
       });
-      for (const raw of buffered) {
-        handleClient(raw);
-      }
       socket.once("close", () => {
+        if (this.#options.serviceKey && upstream && session && !this.#stopping) {
+          this.#externalWriters.delete(clientId);
+          this.#externalRelayCounts.delete(clientId);
+          this.#orphanedClients.set(clientId, { upstream, session, pending: pendingExternalRequests });
+          this.#refreshSubscriptions?.();
+          void this.#queueAudit({ ...clientIdentity, operation: "service.client_detached", outcome: "succeeded",
+            details: { pendingRequests: pendingExternalRequests.size, interruptedTurns: 0 } });
+          return;
+        }
         const cleanup = this.#handleExternalDisconnect(
           clientIdentity,
           pendingExternalRequests,
@@ -627,6 +829,20 @@ export class SharedAppServer {
         this.#externalCleanupTasks.add(cleanup);
         void cleanup.finally(() => this.#externalCleanupTasks.delete(cleanup));
       });
+      // Both reply and disconnect callbacks must exist before accepting input.
+      // A slow audit write must not create a window that loses initialize replies.
+      await this.#queueAudit({
+        ...clientIdentity,
+        operationId: clientId,
+        operation: "external_cli.connect",
+        outcome: "succeeded",
+        hostId: this.#options.config?.host ?? "local",
+        workspaceRoot: this.#activeWorkspaceRoot,
+      });
+      if (closed) return;
+      socket.off("message", bufferMessage);
+      socket.on("message", (data) => handleClient(rawMessage(data)));
+      for (const raw of buffered) handleClient(raw);
     } catch (error) {
       this.#externalWriters.delete(clientId);
       this.#externalRelayCounts.delete(clientId);
@@ -664,10 +880,9 @@ export class SharedAppServer {
     this.#externalWriters.delete(clientIdentity.clientId);
     this.#externalRelayCounts.delete(clientIdentity.clientId);
     session?.closeSession();
-    const turnInterrupts = await this.#interruptExternalTurns(
-      clientIdentity.clientId,
-      upstream,
-    );
+    const turnInterrupts = this.#options.serviceKey || (this.#persistentSession && this.#stopping)
+      ? { confirmed: 0, requested: 0, unconfirmed: 0 }
+      : await this.#interruptExternalTurns(clientIdentity.clientId, upstream);
     upstream?.close();
     await this.#queueAudit({
       ...clientIdentity,
@@ -763,9 +978,42 @@ export class SharedAppServer {
     const session = this.#createSession(true, 0, clientIdentity);
     const pendingClientRequests = new Map<RpcId, PendingClientRequest>();
     const writeUpstream = webSocketWriter(upstream);
-    const writeClient = streamWriter(output);
+    const writeClient = streamWriter(output, () => {
+      if (this.#stopping) return;
+      void this.#queueAudit({ operation: "app_server.output_stalled", outcome: "failed",
+        details: { bufferedBytes: output.writableLength } });
+      this.#requestStop();
+    });
     this.#stdioWriter = writeClient;
     const writeDownstream = this.#downstreamWriter("stdio", writeClient);
+    const recovery = new ThreadSubscriptionRecovery({
+      send: (message) => writeUpstream(message),
+      emit: (message) => {
+        this.#observeServerMessage(message, pendingClientRequests);
+        writeDownstream(message);
+      },
+      workspaceRoot: () => this.#options.serviceScope === "user" ? undefined : this.#activeWorkspaceRoot,
+      selectedThreadId: () => this.#threads.selected,
+      onCycle: (cycle) => {
+        this.#serviceIdleConfirmed = cycle.errors === 0 && cycle.listedThreads === 0;
+        void this.#queueAudit({
+          operation: "thread.recovery.cycle",
+          outcome: cycle.errors ? "failed" : "succeeded",
+          workspaceRoot: this.#activeWorkspaceRoot,
+          details: { ...cycle },
+        }).catch(() => undefined);
+      },
+      log: (message) => errorOutput.write(`codex-bridge: ${message}\n`),
+    });
+    this.#refreshSubscriptions = () => { void recovery.refresh(); };
+    let lastPongAt = Date.now();
+    upstream.on("pong", () => { lastPongAt = Date.now(); });
+    const heartbeat = setInterval(() => {
+      if (upstream.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastPongAt > 25_000) upstream.terminate();
+      else upstream.ping();
+    }, 10_000);
+    heartbeat.unref();
     const lines = createInterface({ input });
     let clientQueue = Promise.resolve();
     lines.on("line", (line) => {
@@ -778,6 +1026,7 @@ export class SharedAppServer {
             clientIdentity,
           );
           await session.handleClientMessage(message, writeUpstream, writeDownstream);
+          if (this.#persistentSession && "method" in message && message.method === "initialized") recovery.start();
         })
         .catch((error) => {
           errorOutput.write(`codex-bridge: invalid client JSON-RPC: ${String(error)}\n`);
@@ -786,6 +1035,7 @@ export class SharedAppServer {
     upstream.on("message", (data) => {
       try {
         const message = parseRpcLine(rawMessage(data));
+        if (recovery.observe(message)) return;
         this.#observeServerMessage(message, pendingClientRequests);
         void session.handleServerMessage(message, writeUpstream, writeDownstream).catch((error) => {
           errorOutput.write(`codex-bridge: server request handling failed: ${String(error)}\n`);
@@ -795,39 +1045,20 @@ export class SharedAppServer {
       }
     });
 
-    const forwardSignal = (signal: NodeJS.Signals): void => {
-      this.#child?.kill(signal);
-      upstream.close();
-      session.closeSession();
-    };
-    const onSigInt = (): void => forwardSignal("SIGINT");
-    const onSigTerm = (): void => forwardSignal("SIGTERM");
-    process.once("SIGINT", onSigInt);
-    process.once("SIGTERM", onSigTerm);
-    let clientEnded = false;
-
     return await new Promise<number>((resolvePromise, reject) => {
       const finish = (code: number): void => {
-        process.removeListener("SIGINT", onSigInt);
-        process.removeListener("SIGTERM", onSigTerm);
+        clearInterval(heartbeat);
+        recovery.dispose();
+        this.#refreshSubscriptions = undefined;
         lines.close();
         session.closeSession();
         this.#stdioWriter = null;
         resolvePromise(code);
       };
-      input.once("end", () => {
-        clientEnded = true;
-        void clientQueue.finally(async () => {
-          await this.#closeExternalClients();
-          upstream.close(1_001, "Bridge client input closed");
-          setTimeout(() => this.#child?.kill("SIGTERM"), 25).unref();
-        });
-      });
       upstream.once("error", reject);
-      this.#child?.once("error", reject);
-      this.#child?.once("close", (code, signal) =>
-        finish(clientEnded ? 0 : signal ? 128 : (code ?? 1)),
-      );
+      upstream.once("close", () => this.#requestStop());
+      void this.#childExited?.then((code) => finish(this.#stopping ? 0 : code));
+      void this.#stopped.then(() => finish(0));
     });
   }
 
@@ -902,6 +1133,11 @@ export class SharedAppServer {
           this.#relayedNotifications.delete(key);
         }
       }
+      while (this.#relayedNotifications.size > 256) {
+        const oldest = this.#relayedNotifications.keys().next().value;
+        if (oldest === undefined) break;
+        this.#relayedNotifications.delete(oldest);
+      }
     }
 
     this.#stdioWriter?.(message);
@@ -930,6 +1166,10 @@ export class SharedAppServer {
       message.method === "thread/start" ||
       message.method === "thread/read" ||
       message.method === "thread/resume" ||
+      message.method === "thread/fork" ||
+      message.method === "thread/unsubscribe" ||
+      message.method === "thread/archive" ||
+      message.method === "thread/delete" ||
       message.method === "turn/start" ||
       message.method === "turn/steer"
     ) {
@@ -943,15 +1183,6 @@ export class SharedAppServer {
           ? { turnId: params.expectedTurnId }
           : {}),
       });
-    }
-    if (message.method === "thread/start" || message.method === "thread/resume") {
-      if (
-        !this.#options.config &&
-        typeof params.cwd === "string" &&
-        isAbsolute(params.cwd)
-      ) {
-        this.#setActiveWorkspaceRoot(params.cwd);
-      }
     }
   }
 
@@ -975,19 +1206,16 @@ export class SharedAppServer {
           }).catch(() => undefined);
         }
         const result = isRecord(message.result) ? message.result : {};
-        const thread = result.thread;
-        if (isRecord(thread) && typeof thread.id === "string") {
-          this.#setActiveThread(thread.id);
-        }
-        if (
-          !message.error &&
-          pending.threadId &&
-          (pending.method === "thread/read" ||
-            pending.method === "thread/resume" ||
-            pending.method === "turn/start" ||
-            pending.method === "turn/steer")
-        ) {
-          this.#setActiveThread(pending.threadId);
+        if (!message.error) {
+          this.#threads.response(pending.method, pending.threadId, result,
+            !this.#options.serviceKey && pending.clientIdentity.clientSource === "vscode");
+          if (!this.#options.serviceKey && !this.#options.config && pending.clientIdentity.clientSource === "vscode" &&
+              ["thread/start", "thread/resume", "thread/fork"].includes(pending.method) &&
+              isRecord(result.thread) && typeof result.thread.cwd === "string" && isAbsolute(result.thread.cwd)) {
+            this.#setActiveWorkspaceRoot(result.thread.cwd);
+          }
+          this.#publishThreadIndex();
+          if (["thread/start", "thread/resume", "thread/fork"].includes(pending.method)) this.#refreshSubscriptions?.();
         }
         const turn = result.turn;
         if (
@@ -996,6 +1224,7 @@ export class SharedAppServer {
           isRecord(turn) &&
           typeof turn.id === "string"
         ) {
+          if (!message.error) this.#activeThreads.set(pending.threadId, turn.id);
           this.#turnClients.record(
             pending.threadId,
             turn.id,
@@ -1020,10 +1249,19 @@ export class SharedAppServer {
     if (!("method" in message) || !isRecord(message.params)) {
       return;
     }
-    const thread = message.params.thread;
-    if (isRecord(thread) && typeof thread.id === "string") {
-      this.#setActiveThread(thread.id);
+    this.#threads.notification(message.method, message.params);
+    const threadId = message.params.threadId;
+    if (typeof threadId === "string") {
+      if (message.method === "turn/started" && isRecord(message.params.turn) && typeof message.params.turn.id === "string") this.#activeThreads.set(threadId, message.params.turn.id);
+      else if (message.method === "turn/completed" && isRecord(message.params.turn) &&
+          this.#activeThreads.get(threadId) === message.params.turn.id) this.#activeThreads.delete(threadId);
+      else if (["thread/closed", "thread/archived", "thread/deleted"].includes(message.method)) this.#activeThreads.delete(threadId);
+      else if (message.method === "thread/status/changed" && isRecord(message.params.status)) {
+        if (message.params.status.type === "active" && !this.#activeThreads.has(threadId)) this.#activeThreads.set(threadId, "unknown");
+        else if (message.params.status.type === "idle" && this.#activeThreads.get(threadId) === "unknown") this.#activeThreads.delete(threadId);
+      }
     }
+    if (message.method.startsWith("thread/") || message.method === "turn/started") this.#publishThreadIndex();
     if (
       message.method === "turn/completed" &&
       typeof message.params.threadId === "string" &&
@@ -1076,14 +1314,10 @@ export class SharedAppServer {
     return this.#auditQueue;
   }
 
-  #setActiveThread(threadId: string): void {
-    if (this.#activeThreadId === threadId) {
-      return;
-    }
-    this.#activeThreadId = threadId;
+  #publishThreadIndex(): void {
     const address = this.#externalServer?.address();
     if (address && typeof address !== "string") {
-      void this.#writeDescriptor(`ws://${LOOPBACK_HOST}:${address.port}`);
+      void this.#writeDescriptor(`ws://${LOOPBACK_HOST}:${address.port}`).catch(() => undefined);
     }
   }
 
@@ -1094,7 +1328,7 @@ export class SharedAppServer {
     this.#activeWorkspaceRoot = workspaceRoot;
     const address = this.#externalServer?.address();
     if (address && typeof address !== "string") {
-      void this.#writeDescriptor(`ws://${LOOPBACK_HOST}:${address.port}`);
+      void this.#writeDescriptor(`ws://${LOOPBACK_HOST}:${address.port}`).catch(() => undefined);
     }
   }
 
@@ -1104,33 +1338,96 @@ export class SharedAppServer {
     }
     const descriptor: ExternalCliSessionDescriptor = {
       version: 3,
+      codexHome: resolve(process.env.CODEX_HOME ?? join(homedir(), ".codex")),
+      ...(this.#options.serviceScope ? { serviceScope: this.#options.serviceScope } : {}),
+      ...(this.#options.serviceKey ? { serviceKey: this.#options.serviceKey } : {}),
       appServer: this.#appServerIdentity,
       endpoint,
       executablePath: this.#processExecutablePath,
+      ...(this.#selfIdentity?.executableFileId ? { executableFileId: this.#selfIdentity.executableFileId } : {}),
       host: this.#options.config?.host ?? "local",
       pid: process.pid,
       startedAtMs: this.#startedAtMs,
       tokenEnv: EXTERNAL_TOKEN_ENV,
       tokenPath: this.#externalTokenPath,
       workspaceRoot: this.#activeWorkspaceRoot,
-      ...(this.#activeThreadId ? { threadId: this.#activeThreadId } : {}),
+      lifecycle: this.#lifecycle,
+      upstreamEndpoint: this.#upstreamEndpoint,
+      ...(this.#persistentSession ? { retainUntilMs: Date.now() + 30 * 60_000 } : {}),
+      loadedThreadIds: [...this.#threads.loaded],
+      ...(this.#threads.selected ? { threadId: this.#threads.selected } : {}),
     };
     const temporaryPath = `${this.#sessionPath}.${randomBytes(6).toString("hex")}.tmp`;
-    this.#descriptorQueue = this.#descriptorQueue.then(async () => {
-      await writeFile(temporaryPath, `${JSON.stringify(descriptor, null, 2)}\n`, {
-        mode: 0o600,
-      });
-      await chmodIfSupported(temporaryPath, 0o600);
-      await rename(temporaryPath, this.#sessionPath);
+    this.#descriptorQueue = this.#descriptorQueue.catch(() => undefined).then(async () => {
+      try {
+        await writeFile(temporaryPath, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600 });
+        await chmodIfSupported(temporaryPath, 0o600);
+        await rename(temporaryPath, this.#sessionPath);
+      } finally { await rm(temporaryPath, { force: true }); }
     });
     await this.#descriptorQueue;
   }
 
   async #close(): Promise<void> {
+    this.#closeTask ??= this.#closeOnce();
+    return await this.#closeTask;
+  }
+
+  #requestStop(): void {
+    if (this.#stopping) return;
+    this.#stopping = true;
+    this.#lifecycle = "stopping";
+    this.#publishThreadIndex();
+    if ((this.#child || this.#appServerIdentity) && !this.#stopChildTask) this.#stopChildTask = this.#stopChild();
+  }
+
+  async #waitForChild(timeoutMs: number): Promise<boolean> {
+    if (!this.#childExited) return true;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        this.#childExited.then(() => true),
+        new Promise<boolean>((resolvePromise) => { timer = setTimeout(() => resolvePromise(false), timeoutMs); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
+  async #stopChild(): Promise<boolean> {
+    await this.#closeExternalClients();
+    for (const socket of this.#upstreams) socket.terminate();
+    if (this.#persistentSession && ((!this.#options.serviceKey && this.#ready) || this.#threads.loaded.size > 0 || !this.#child)) {
+      this.#detached = true;
+      this.#lifecycle = "detached";
+      this.#publishThreadIndex();
+      this.#child?.stdin.destroy();
+      this.#child?.stdout.destroy();
+      this.#child?.stderr.destroy();
+      this.#child?.unref();
+      this.#resolveStopped();
+      return true;
+    }
+    this.#child?.kill("SIGTERM");
+    if (await this.#waitForChild(2_000)) { this.#resolveStopped(); return true; }
+    // Escalate only the child we spawned, never a PID discovered by name.
+    this.#child?.kill("SIGKILL");
+    const exited = await this.#waitForChild(1_000);
+    this.#resolveStopped();
+    return exited;
+  }
+
+  async #closeOnce(): Promise<void> {
+    this.#requestStop();
+    const childStopped = await (this.#stopChildTask ?? Promise.resolve(true));
     await this.#closeExternalClients();
     await Promise.allSettled([...this.#externalCleanupTasks]);
     this.#externalWriters.clear();
     this.#externalRelayCounts.clear();
+    for (const [id, client] of this.#orphanedClients) {
+      client.session.closeSession();
+      client.upstream.terminate();
+      this.#serviceRequests.remove(id);
+    }
+    this.#orphanedClients.clear();
     this.#stdioWriter = null;
     this.#relayedNotifications.clear();
     await new Promise<void>((resolvePromise) => {
@@ -1141,11 +1438,22 @@ export class SharedAppServer {
       this.#externalServer.close(() => resolvePromise());
     });
     this.#externalServer = null;
-    this.#child?.kill("SIGTERM");
+    await this.#audit.write({ operation: this.#detached ? "app_server.detached" : "app_server.shutdown", outcome: childStopped ? "succeeded" : "failed",
+      details: { childPid: this.#appServerIdentity?.pid ?? null, childExited: childStopped && !this.#detached } });
+    if (this.#detached && !this.#pendingHandoff) {
+      await this.#descriptorQueue.catch(() => undefined);
+      return;
+    }
+    if (!childStopped) {
+      this.#lifecycle = "failed";
+      await this.#descriptorQueue.catch(() => undefined);
+      throw new Error("Owned app-server did not exit; recovery journal retained");
+    }
     this.#child = null;
     this.#appServerIdentity = null;
     await this.#descriptorQueue.catch(() => undefined);
     await this.#auditQueue.catch(() => undefined);
+    if (!this.#ownsState) return;
     await Promise.all([
       rm(this.#sessionPath, { force: true }),
       rm(this.#externalTokenPath, { force: true }),

@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, resolve, win32 } from "node:path";
 import { bridgeExternalCliDir } from "../core/locations.js";
 import {
   inspectProcessIdentities,
+  processIdentitiesMatch,
   processExecutablePathsEqual,
   type ProcessIdentity,
   type ProcessIdentityInspector,
@@ -44,6 +45,11 @@ function parseDescriptor(
     typeof value.workspaceRoot !== "string" ||
     value.workspaceRoot.length === 0 ||
     ("threadId" in value && typeof value.threadId !== "string") ||
+    ("codexHome" in value && typeof value.codexHome !== "string") ||
+    ("serviceScope" in value && value.serviceScope !== "user") ||
+    ("executableFileId" in value && typeof value.executableFileId !== "string") ||
+    ("serviceKey" in value && (typeof value.serviceKey !== "string" || !/^[a-f0-9]{64}$/.test(value.serviceKey))) ||
+    ("lifecycle" in value && !["starting", "ready", "stopping", "detached", "failed"].includes(String(value.lifecycle))) ||
     ("executablePath" in value &&
       (typeof value.executablePath !== "string" ||
         !(hostPlatform === "win32"
@@ -99,6 +105,9 @@ function descriptorMatchesProcess(
     }
   }
   if (descriptor.executablePath) {
+    if (descriptor.executableFileId && hostPlatform === "linux") {
+      return processIdentitiesMatch({ ...descriptor, executablePath: descriptor.executablePath }, identity, hostPlatform);
+    }
     return processExecutablePathsEqual(
       descriptor.executablePath,
       identity.executablePath,
@@ -191,12 +200,12 @@ export async function discoverExternalCliSessions(
 
   let identities: Map<number, ProcessIdentity>;
   try {
-    identities = await inspectProcesses(candidates.map(({ descriptor }) => descriptor.pid));
+    identities = await inspectProcesses(candidates.flatMap(({ descriptor }) =>
+      descriptor.appServer ? [descriptor.pid, descriptor.appServer.pid] : [descriptor.pid],
+    ));
   } catch {
-    return candidates
-      .map(({ descriptor }) => descriptor)
-      .filter(({ pid }) => processIsAlive(pid))
-      .sort((left, right) => right.startedAtMs - left.startedAtMs);
+    // An unverifiable process must not become a live conversation endpoint.
+    return [];
   }
 
   const sessions: ExternalCliSessionDescriptor[] = [];
@@ -206,13 +215,23 @@ export async function discoverExternalCliSessions(
       identity &&
       descriptorMatchesProcess(candidate.descriptor, identity, hostPlatform)
     ) {
-      sessions.push(candidate.descriptor);
+      const descriptor = candidate.descriptor;
+      const appServer = descriptor.appServer;
+      const actual = appServer ? identities.get(appServer.pid) : undefined;
+      if (
+        (!descriptor.lifecycle || descriptor.lifecycle === "ready") &&
+        (!appServer || processIdentitiesMatch(appServer, actual, hostPlatform, CURRENT_STARTED_AT_TOLERANCE_MS))
+      ) sessions.push(descriptor);
       continue;
     }
     if (!identity && processIsAlive(candidate.descriptor.pid)) {
       continue;
     }
-    await removeDescriptorIfUnchanged(candidate.path, candidate.raw).catch(() => undefined);
+    // v2/v3 records are also the recovery journal for an orphaned app-server.
+    // Only the identity-verifying reaper may remove them after the child exits.
+    if (candidate.descriptor.version === 1) {
+      await removeDescriptorIfUnchanged(candidate.path, candidate.raw).catch(() => undefined);
+    }
   }
   return sessions.sort((left, right) => right.startedAtMs - left.startedAtMs);
 }

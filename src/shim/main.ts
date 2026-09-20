@@ -36,6 +36,9 @@ import {
 } from "./official-shim-launcher.js";
 import { routeRemoteMcpServers } from "./remote-mcp.js";
 import { SharedAppServer } from "./shared-app-server.js";
+import { resolveServiceWorkspace,
+  runLocalServiceWorker, SERVICE_WORKER_ARGUMENT } from "./local-app-server-service.js";
+import { runUnifiedLocalClient } from "./unified-local-client.js";
 import {
   createToolRouteInventory,
   type ToolRouteInventory,
@@ -181,6 +184,16 @@ function externalCliProgress(message: string): void {
 }
 
 async function main(): Promise<number> {
+  if (process.argv.includes(SERVICE_WORKER_ARGUMENT)) return await runLocalServiceWorker();
+  if (process.env.CODEX_BRIDGE_DESKTOP_CLIENT === "1") {
+    const args = process.argv.slice(2);
+    const executable = process.env.CODEX_BRIDGE_DESKTOP_CODEX_EXECUTABLE;
+    if (!executable || !isAbsolute(executable)) throw new Error("Desktop bundled Codex executable is not configured");
+    assertExecutableIsNotShim(executable);
+    if (!args.includes("app-server") || args.includes("daemon") || args.includes("--help")) return await passthrough(executable, args);
+    return await runUnifiedLocalClient({ appServerArgs: args, codexExecutable: executable,
+      auditPath: bridgeAuditPath(), clientKind: "desktop" });
+  }
   if (isOfficialShimLauncherInvocation()) {
     return await runOfficialShimLauncher();
   }
@@ -332,7 +345,15 @@ async function main(): Promise<number> {
     },
   });
 
+  if (process.platform === "linux" && config === null) {
+    const workspaceRoot = await resolveServiceWorkspace(localWorkspaceContextFile, localWorkspaceRoot);
+    if (workspaceRoot) {
+      return await runUnifiedLocalClient({ appServerArgs, codexExecutable, workspaceRoot,
+        auditPath, clientKind: "vscode" });
+    }
+  }
   const proxy = new SharedAppServer({
+    persistentSession: process.platform === "linux" && config === null,
     appServerArgs,
     appServerCwd: controlDir,
     auditPath,
