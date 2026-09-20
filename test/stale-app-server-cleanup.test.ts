@@ -99,11 +99,64 @@ function options(
     hostPlatform: "linux",
     inspectProcesses,
     wait: async () => undefined,
+    canRetireAppServer: async () => true,
     ...overrides,
   };
 }
 
 describe("stale official Codex app-server cleanup", () => {
+  it("keeps legacy recovery evidence when the same process has a relocated executable", async () => {
+    const directory = await createDirectory();
+    const shim = identity(4831, "/state/bin/codex-bridge-shim", 10_000);
+    const appServer = identity(4832, "/extension/bin/codex", 10_100);
+    const path = await writeDescriptor(directory, descriptor(shim, appServer));
+    const { inspectProcesses } = processTable([{ ...appServer, executablePath: "/tmp/upgrade/codex (deleted)" }]);
+    const terminateProcess = vi.fn();
+    const result = await cleanupStaleOfficialAppServers(options(directory, inspectProcesses, { terminateProcess }));
+    expect(result.failedPids).toEqual([appServer.pid]);
+    expect(terminateProcess).not.toHaveBeenCalled();
+    await expect(access(path)).resolves.toBeUndefined();
+  });
+
+  it("does not retire active or unverifiable background work", async () => {
+    const directory = await createDirectory();
+    const shim = identity(4801, "/state/bin/codex-bridge-shim", 10_000);
+    const appServer = identity(4802, "/extension/bin/codex", 10_100);
+    const path = await writeDescriptor(directory, descriptor(shim, appServer));
+    const { inspectProcesses } = processTable([appServer]);
+    const terminateProcess = vi.fn();
+    await cleanupStaleOfficialAppServers(options(directory, inspectProcesses, {
+      terminateProcess, canRetireAppServer: async () => false,
+    }));
+    expect(terminateProcess).not.toHaveBeenCalled();
+    await expect(access(path)).resolves.toBeUndefined();
+  });
+
+  it("preserves a detached journal during its reconnect grace period", async () => {
+    const directory = await createDirectory();
+    const shim = identity(4811, "/state/bin/codex-bridge-shim", 10_000);
+    const appServer = identity(4812, "/extension/bin/codex", 10_100);
+    const path = await writeDescriptor(directory, { ...descriptor(shim, appServer), retainUntilMs: Date.now() + 60_000 });
+    const { inspectProcesses } = processTable([appServer]);
+    const terminateProcess = vi.fn();
+    await cleanupStaleOfficialAppServers(options(directory, inspectProcesses, { terminateProcess }));
+    expect(terminateProcess).not.toHaveBeenCalled();
+    await expect(access(path)).resolves.toBeUndefined();
+  });
+
+  it("does not terminate an app-server already claimed by another live Shim", async () => {
+    const directory = await createDirectory();
+    const shim = identity(4821, "/state/bin/codex-bridge-shim", 10_000);
+    const owner = identity(4823, "/state/bin/codex-bridge-shim", 20_000);
+    const appServer = identity(4822, "/extension/bin/codex", 10_100);
+    await writeDescriptor(directory, descriptor(shim, appServer));
+    await writeDescriptor(directory, descriptor(owner, appServer));
+    const { inspectProcesses } = processTable([owner, appServer]);
+    const terminateProcess = vi.fn();
+    await cleanupStaleOfficialAppServers(options(directory, inspectProcesses, { terminateProcess }));
+    expect(terminateProcess).not.toHaveBeenCalled();
+  });
+
   it("leaves a descriptor owned by its live Shim untouched", async () => {
     const directory = await createDirectory();
     const shim = identity(4101, "/state/bin/codex-bridge-shim", 10_000);
@@ -228,7 +281,7 @@ describe("stale official Codex app-server cleanup", () => {
       cleanupStaleOfficialAppServers(
         options(directory, inspectProcesses, { isProcessAlive: () => false }),
       ),
-    ).resolves.toMatchObject({ removedCount: 0, staleCount: 1 });
+    ).resolves.toMatchObject({ removedCount: 0, staleCount: 0 });
     await expect(readFile(path, "utf8")).resolves.toBe(
       `${JSON.stringify(replacement)}\n`,
     );

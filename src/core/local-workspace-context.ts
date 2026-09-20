@@ -15,7 +15,7 @@ export interface LocalWorkspaceFolder {
 
 interface LocalWorkspaceContext {
   version: 1;
-  workspaceRoot: string;
+  workspaceRoot: string | null;
 }
 
 export function localWorkspaceContextPath(
@@ -69,16 +69,12 @@ export async function saveLocalWorkspaceContext(
   path: string,
   workspaceRoot: string | null,
 ): Promise<void> {
-  if (workspaceRoot === null) {
-    await clearLocalWorkspaceContext(path);
-    return;
-  }
-  if (!isAbsolute(workspaceRoot)) {
+  if (workspaceRoot !== null && !isAbsolute(workspaceRoot)) {
     throw new TypeError("Local workspace root must be absolute");
   }
   const record: LocalWorkspaceContext = {
     version: 1,
-    workspaceRoot: resolve(workspaceRoot),
+    workspaceRoot: workspaceRoot === null ? null : resolve(workspaceRoot),
   };
   await mkdir(dirname(path), { mode: 0o700, recursive: true });
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -95,7 +91,9 @@ export async function saveLocalWorkspaceContext(
   }
 }
 
-export async function loadLocalWorkspaceContext(path: string): Promise<string | null> {
+export async function readLocalWorkspaceContext(
+  path: string,
+): Promise<LocalWorkspaceContext | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
     if (
@@ -104,15 +102,26 @@ export async function loadLocalWorkspaceContext(path: string): Promise<string | 
       !("version" in parsed) ||
       parsed.version !== 1 ||
       !("workspaceRoot" in parsed) ||
-      typeof parsed.workspaceRoot !== "string" ||
-      !isAbsolute(parsed.workspaceRoot)
+      (parsed.workspaceRoot !== null &&
+        (typeof parsed.workspaceRoot !== "string" ||
+          !isAbsolute(parsed.workspaceRoot)))
     ) {
       return null;
     }
-    return resolve(parsed.workspaceRoot);
+    return {
+      version: 1,
+      workspaceRoot:
+        parsed.workspaceRoot === null ? null : resolve(parsed.workspaceRoot),
+    };
   } catch {
     return null;
   }
+}
+
+export async function loadLocalWorkspaceContext(
+  path: string,
+): Promise<string | null> {
+  return (await readLocalWorkspaceContext(path))?.workspaceRoot ?? null;
 }
 
 export async function clearLocalWorkspaceContext(path: string): Promise<void> {

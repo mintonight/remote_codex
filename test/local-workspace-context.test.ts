@@ -6,6 +6,7 @@ import {
   clearLocalWorkspaceContext,
   LOCAL_WORKSPACE_ROOT_ENV,
   loadLocalWorkspaceContext,
+  readLocalWorkspaceContext,
   localWorkspaceContextPath,
   localWorkspaceRoot,
   publishLocalWorkspaceRoot,
@@ -21,12 +22,25 @@ const localFolder = {
 };
 
 describe("local workspace context", () => {
+  it("distinguishes a published rootless window from a context not published yet", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-rootless-context-"));
+    const path = localWorkspaceContextPath(4321, directory);
+    expect(await readLocalWorkspaceContext(path)).toBeNull();
+    await saveLocalWorkspaceContext(path, null);
+    expect(await readLocalWorkspaceContext(path)).toEqual({
+      version: 1,
+      workspaceRoot: null,
+    });
+    expect(await loadLocalWorkspaceContext(path)).toBeNull();
+    await clearLocalWorkspaceContext(path);
+    expect(await readLocalWorkspaceContext(path)).toBeNull();
+  });
   it("publishes the only local file workspace root", () => {
     const environment: NodeJS.ProcessEnv = {};
 
-    expect(publishLocalWorkspaceRoot(environment, undefined, [localFolder])).toBe(
-      resolve(localFolder.uri.fsPath),
-    );
+    expect(
+      publishLocalWorkspaceRoot(environment, undefined, [localFolder]),
+    ).toBe(resolve(localFolder.uri.fsPath));
     expect(environment[LOCAL_WORKSPACE_ROOT_ENV]).toBe(
       resolve(localFolder.uri.fsPath),
     );
@@ -34,7 +48,9 @@ describe("local workspace context", () => {
 
   it("does not guess a root for remote, multi-root, or non-file workspaces", () => {
     expect(localWorkspaceRoot("ssh-remote", [localFolder])).toBeNull();
-    expect(localWorkspaceRoot(undefined, [localFolder, localFolder])).toBeNull();
+    expect(
+      localWorkspaceRoot(undefined, [localFolder, localFolder]),
+    ).toBeNull();
     expect(
       localWorkspaceRoot(undefined, [
         { uri: { fsPath: "/virtual/project", scheme: "untitled" } },
@@ -44,7 +60,8 @@ describe("local workspace context", () => {
 
   it("consumes a valid inherited root and clears stale or invalid values", () => {
     const environment: NodeJS.ProcessEnv = {
-      [LOCAL_WORKSPACE_ROOT_ENV]: "/home/zkbot/work/train/MimicLite/../MimicLite",
+      [LOCAL_WORKSPACE_ROOT_ENV]:
+        "/home/zkbot/work/train/MimicLite/../MimicLite",
     };
     expect(takeLocalWorkspaceRoot(environment)).toBe(
       resolve("/home/zkbot/work/train/MimicLite"),
@@ -57,7 +74,9 @@ describe("local workspace context", () => {
   });
 
   it("shares a local workspace root by Extension Host PID without startup ordering", async () => {
-    const stateDirectory = await mkdtemp(join(tmpdir(), "codex-bridge-local-context-"));
+    const stateDirectory = await mkdtemp(
+      join(tmpdir(), "codex-bridge-local-context-"),
+    );
     const contextPath = localWorkspaceContextPath(4321, stateDirectory);
 
     expect(await loadLocalWorkspaceContext(contextPath)).toBeNull();

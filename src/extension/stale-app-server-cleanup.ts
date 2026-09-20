@@ -1,14 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { bridgeExternalCliDir } from "../core/locations.js";
 import {
   inspectProcessIdentities,
-  processExecutablePathsEqual,
+  processIdentitiesMatch,
   type ProcessIdentity,
   type ProcessIdentityInspector,
 } from "../shim/process-identity.js";
 import { isRecord } from "../shim/rpc.js";
+import { managedUpstream, probeManagedAppServerIdle } from "../shim/app-server-handoff.js";
 
 const PROCESS_START_TOLERANCE_MS = 2_000;
 const TERMINATION_TIMEOUT_MS = 2_000;
@@ -22,6 +23,7 @@ interface StaleSessionCandidate {
   raw: string;
   startedAtMs: number;
   version: 2 | 3;
+  retainUntilMs?: number;
 }
 
 export interface StaleAppServerCleanupSummary {
@@ -42,6 +44,7 @@ export interface StaleAppServerCleanupOptions {
   isProcessAlive?: (pid: number) => boolean;
   terminateProcess?: (pid: number, signal: NodeJS.Signals) => void;
   wait?: (delayMs: number) => Promise<void>;
+  canRetireAppServer?: (candidatePath: string) => Promise<boolean>;
 }
 
 function processIsAlive(pid: number): boolean {
@@ -95,6 +98,7 @@ function parseCandidate(
       executablePath: value.appServer.executablePath,
       pid: value.appServer.pid,
       startedAtMs: value.appServer.startedAtMs,
+      ...(typeof value.appServer.executableFileId === "string" ? { executableFileId: value.appServer.executableFileId } : {}),
     };
   }
   return {
@@ -105,6 +109,7 @@ function parseCandidate(
     raw,
     startedAtMs: value.startedAtMs,
     version: value.version,
+    ...(typeof value.retainUntilMs === "number" ? { retainUntilMs: value.retainUntilMs } : {}),
   };
 }
 
@@ -120,17 +125,7 @@ function identitiesMatch(
   actual: ProcessIdentity | undefined,
   hostPlatform: NodeJS.Platform,
 ): boolean {
-  return Boolean(
-    actual &&
-      expected.pid === actual.pid &&
-      Math.abs(expected.startedAtMs - actual.startedAtMs) <=
-        PROCESS_START_TOLERANCE_MS &&
-      processExecutablePathsEqual(
-        expected.executablePath,
-        actual.executablePath,
-        hostPlatform,
-      ),
-  );
+  return processIdentitiesMatch(expected, actual, hostPlatform, PROCESS_START_TOLERANCE_MS);
 }
 
 async function readCandidates(
@@ -215,6 +210,10 @@ async function terminateMatchingProcess(
     return { stopped: !isProcessAlive(expected.pid), terminated: false };
   }
   if (!identitiesMatch(expected, current, hostPlatform)) {
+    if (expected.pid === current.pid && Math.abs(expected.startedAtMs - current.startedAtMs) <= PROCESS_START_TOLERANCE_MS) {
+      // A moved/deleted legacy image can still own threads. Preserve its journal for attested handoff.
+      return { stopped: false, terminated: false };
+    }
     return { stopped: true, terminated: false };
   }
   try {
@@ -325,6 +324,30 @@ export async function cleanupStaleOfficialAppServers(
     if (!shimIdentity && isProcessAlive(candidate.pid)) {
       continue;
     }
+    if (candidate.retainUntilMs && candidate.retainUntilMs > Date.now()) continue;
+    // A pending handoff or a running/unknown thread is not abandoned work.
+    const claimPath = candidate.appServer ? join(directory, `app-server-${candidate.appServer.pid}.claim`) : `${candidate.path}.claim`;
+    const claim = await open(claimPath, "wx", 0o600).catch(() => null);
+    if (!claim) continue;
+    try {
+    await claim.writeFile(JSON.stringify({ pid: process.pid }));
+    if (await readFile(candidate.path, "utf8").catch(() => "") !== candidate.raw) continue;
+    if (candidate.appServer) {
+      const owners = (await readCandidates(directory, hostPlatform)).filter((other) =>
+        other.pid !== candidate.pid && other.appServer?.pid === candidate.appServer?.pid);
+      const identities = await inspectProcesses(owners.map((owner) => owner.pid));
+      if (owners.some((owner) => identitiesMatch({ pid: owner.pid, executablePath: owner.executablePath,
+        startedAtMs: owner.startedAtMs }, identities.get(owner.pid), hostPlatform) || isProcessAlive(owner.pid))) continue;
+    }
+    const canRetire = options.canRetireAppServer ?? (async () => {
+      try {
+        if (candidate.appServer && !isProcessAlive(candidate.appServer.pid)) return true;
+        const value = JSON.parse(candidate.raw) as Record<string, unknown>;
+        const upstream = await managedUpstream(directory, candidate.pid, value);
+        return await probeManagedAppServerIdle(upstream.endpoint, upstream.token);
+      } catch { return false; }
+    });
+    if (!(await canRetire(candidate.path))) continue;
     summary.staleCount += 1;
     let appServers = candidate.appServer ? [candidate.appServer] : [];
     if (candidate.version === 2) {
@@ -358,6 +381,7 @@ export async function cleanupStaleOfficialAppServers(
     if (stopped && (await removeSessionFilesIfUnchanged(candidate, directory))) {
       summary.removedCount += 1;
     }
+    } finally { await claim.close(); await rm(claimPath, { force: true }); }
   }
   return summary;
 }

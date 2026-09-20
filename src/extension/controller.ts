@@ -279,6 +279,8 @@ export class BridgeController implements vscode.Disposable {
   #initialization: Promise<void> | null = null;
   #dropOnboarding: Promise<void> | null = null;
   #shutdown: Promise<void> | null = null;
+  #sessionMaintenance: Promise<void> | null = null;
+  #sessionMaintenanceTimer: NodeJS.Timeout | undefined;
   #reloadRequested = false;
   #autoSuppressed = false;
   #remoteIdentity: RemoteIdentity | null = null;
@@ -390,6 +392,8 @@ export class BridgeController implements vscode.Disposable {
       ),
       this.#workspaceResources.register(),
     ];
+    this.#sessionMaintenanceTimer = setInterval(() => void this.#maintainSessions(), 60_000);
+    this.#sessionMaintenanceTimer?.unref();
   }
 
   async initialize(): Promise<void> {
@@ -418,28 +422,30 @@ export class BridgeController implements vscode.Disposable {
     }
   }
 
+  async #maintainSessions(): Promise<void> {
+    if (this.#shutdown) return;
+    if (this.#sessionMaintenance) return await this.#sessionMaintenance;
+    this.#sessionMaintenance = (async () => {
+      try {
+        const cleanup = await cleanupStaleOfficialAppServers();
+        if (cleanup.staleCount > 0) {
+          const outcome = cleanup.failedPids.length === 0 ? "succeeded" : "failed";
+          this.#log(`stale official Codex app-server cleanup ${outcome}: stale=${cleanup.staleCount}, terminated=${cleanup.terminatedPids.length}, removed=${cleanup.removedCount}, failed=${cleanup.failedPids.length}`);
+          await this.#audit.write({ operation: "app_server.stale_cleanup", outcome, details: { ...cleanup } });
+        }
+      } catch (error) { this.#log(`stale official Codex app-server cleanup skipped: ${String(error)}`); }
+    })();
+    try { await this.#sessionMaintenance; }
+    finally { this.#sessionMaintenance = null; }
+  }
+
   async #initializeOnce(): Promise<boolean> {
     if (this.#state.state === "configuring") {
       this.#log("automatic initialization deferred while configuration is in progress");
       return false;
     }
 
-    try {
-      const cleanup = await cleanupStaleOfficialAppServers();
-      if (cleanup.staleCount > 0) {
-        const outcome = cleanup.failedPids.length === 0 ? "succeeded" : "failed";
-        this.#log(
-          `stale official Codex app-server cleanup ${outcome}: stale=${cleanup.staleCount}, terminated=${cleanup.terminatedPids.length}, removed=${cleanup.removedCount}, failed=${cleanup.failedPids.length}`,
-        );
-        await this.#audit.write({
-          operation: "app_server.stale_cleanup",
-          outcome,
-          details: { ...cleanup },
-        });
-      }
-    } catch (error) {
-      this.#log(`stale official Codex app-server cleanup skipped: ${String(error)}`);
-    }
+    await this.#maintainSessions();
 
     const plan = planAutomaticInitialization({
       autoInitialize: vscode.workspace
@@ -1446,6 +1452,8 @@ export class BridgeController implements vscode.Disposable {
   }
 
   async #shutdownOnce(): Promise<void> {
+    if (this.#sessionMaintenanceTimer) clearInterval(this.#sessionMaintenanceTimer);
+    await this.#sessionMaintenance;
     this.#stopShimRuntimeMonitor();
     this.#executor?.close();
     this.#executor = null;

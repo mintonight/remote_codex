@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, readlink, stat } from "node:fs/promises";
 import { isAbsolute, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
 import { isRecord } from "./rpc.js";
@@ -10,6 +10,7 @@ export interface ProcessIdentity {
   executablePath: string;
   pid: number;
   startedAtMs: number;
+  executableFileId?: string;
 }
 
 export type ProcessIdentityInspector = (
@@ -24,12 +25,15 @@ export function currentProcessStartedAtMs(
 }
 
 function uniquePids(pids: readonly number[]): number[] {
-  return [...new Set(pids.filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
+  return [
+    ...new Set(pids.filter((pid) => Number.isSafeInteger(pid) && pid > 0)),
+  ];
 }
 
 function parseWindowsIdentities(raw: string): Map<number, ProcessIdentity> {
   const parsed: unknown = JSON.parse(raw);
-  const items = isRecord(parsed) && Array.isArray(parsed.items) ? parsed.items : [];
+  const items =
+    isRecord(parsed) && Array.isArray(parsed.items) ? parsed.items : [];
   const identities = new Map<number, ProcessIdentity>();
   for (const item of items) {
     if (
@@ -53,7 +57,9 @@ function parseWindowsIdentities(raw: string): Map<number, ProcessIdentity> {
   return identities;
 }
 
-async function inspectWindowsProcesses(pids: readonly number[]): Promise<Map<number, ProcessIdentity>> {
+async function inspectWindowsProcesses(
+  pids: readonly number[],
+): Promise<Map<number, ProcessIdentity>> {
   const list = uniquePids(pids);
   if (list.length === 0) {
     return new Map();
@@ -104,7 +110,10 @@ function linuxProcessStartTicks(raw: string): number {
   if (commandEnd < 0) {
     throw new TypeError("Linux process stat is malformed");
   }
-  const fields = raw.slice(commandEnd + 1).trim().split(/\s+/);
+  const fields = raw
+    .slice(commandEnd + 1)
+    .trim()
+    .split(/\s+/);
   const value = fields[19] ? Number.parseInt(fields[19], 10) : Number.NaN;
   if (!Number.isFinite(value)) {
     throw new TypeError("Linux process stat has no start time");
@@ -112,7 +121,9 @@ function linuxProcessStartTicks(raw: string): number {
   return value;
 }
 
-async function inspectLinuxProcesses(pids: readonly number[]): Promise<Map<number, ProcessIdentity>> {
+async function inspectLinuxProcesses(
+  pids: readonly number[],
+): Promise<Map<number, ProcessIdentity>> {
   const list = uniquePids(pids);
   if (list.length === 0) {
     return new Map();
@@ -134,15 +145,23 @@ async function inspectLinuxProcesses(pids: readonly number[]): Promise<Map<numbe
   await Promise.all(
     list.map(async (pid) => {
       try {
-        const [executablePath, stat] = await Promise.all([
-          realpath(`/proc/${pid}/exe`),
-          readFile(`/proc/${pid}/stat`, "utf8"),
-        ]);
+        const [executablePath, processStat, executableStat] = await Promise.all(
+          [
+            readlink(`/proc/${pid}/exe`),
+            readFile(`/proc/${pid}/stat`, "utf8"),
+            stat(`/proc/${pid}/exe`, { bigint: true }),
+          ],
+        );
         const startedAtMs = Math.round(
           bootTimeSeconds * 1_000 +
-            (linuxProcessStartTicks(stat) / ticksPerSecond) * 1_000,
+            (linuxProcessStartTicks(processStat) / ticksPerSecond) * 1_000,
         );
-        identities.set(pid, { executablePath, pid, startedAtMs });
+        identities.set(pid, {
+          executablePath,
+          pid,
+          startedAtMs,
+          executableFileId: `${executableStat.dev}:${executableStat.ino}`,
+        });
       } catch {
         // The process may exit while its procfs entries are being inspected.
       }
@@ -170,7 +189,37 @@ export function processExecutablePathsEqual(
   hostPlatform: NodeJS.Platform = process.platform,
 ): boolean {
   if (hostPlatform === "win32") {
-    return win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase();
+    return (
+      win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase()
+    );
   }
   return resolve(left) === resolve(right);
+}
+
+export function processIdentitiesMatch(
+  expected: ProcessIdentity,
+  actual: ProcessIdentity | undefined,
+  hostPlatform: NodeJS.Platform = process.platform,
+  toleranceMs = 2_000,
+): boolean {
+  if (
+    !actual ||
+    !Number.isSafeInteger(expected.pid) || expected.pid <= 0 ||
+    !Number.isFinite(expected.startedAtMs) || !Number.isFinite(actual.startedAtMs) ||
+    !Number.isFinite(toleranceMs) || toleranceMs < 0 ||
+    actual.pid !== expected.pid ||
+    Math.abs(actual.startedAtMs - expected.startedAtMs) > toleranceMs
+  )
+    return false;
+  if (hostPlatform === "linux" && expected.executableFileId !== undefined) {
+    return (
+      /^\d+:\d+$/.test(expected.executableFileId) &&
+      expected.executableFileId === actual.executableFileId
+    );
+  }
+  return processExecutablePathsEqual(
+    expected.executablePath,
+    actual.executablePath,
+    hostPlatform,
+  );
 }
