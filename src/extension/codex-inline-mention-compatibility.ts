@@ -34,6 +34,7 @@ interface PatchMetadata {
 }
 
 export type CodexInlineMentionCompatibilityStatus =
+  | "update-available"
   | "disabled"
   | "patched"
   | "already-patched"
@@ -694,8 +695,10 @@ export async function inspectCodexInlineMentionCompatibility(
     }
     const currentSha256 = sha256(current);
     if (currentSha256 === stored.patchedSha256) {
+      const desired = inspectCodexInlineMentionSource(backup.toString("utf8"));
+      if (desired.status !== "patchable") return { status: "conflict", changed: false, extensionVersion: options.extensionVersion, targetPath: stored.targetPath, detail: "managed original cannot be verified" };
       return {
-        status: "already-patched",
+        status: sha256(desired.patchedSource) === stored.patchedSha256 ? "already-patched" : "update-available",
         changed: false,
         extensionVersion: options.extensionVersion,
         targetPath: stored.targetPath,

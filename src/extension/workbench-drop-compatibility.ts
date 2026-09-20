@@ -61,6 +61,7 @@ export type WorkbenchAssetReplacer = (
 ) => Promise<void>;
 
 export type WorkbenchDropCompatibilityStatus =
+  | "update-available"
   | "disabled"
   | "patched"
   | "already-patched"
@@ -1035,7 +1036,10 @@ export async function inspectWorkbenchDropCompatibility(
       currentSha256 === stored.patchedSha256 &&
       currentProductSha256 === stored.productPatchedSha256
     ) {
-      return { status: "already-patched", ...common };
+      const original = await readManagedFile(backupPath(options.stateDirectory), stored.originalSha256);
+      const desired = original ? inspectWorkbenchDropSource(original.toString("utf8")) : null;
+      if (!desired || desired.status !== "patchable") return { status: "conflict", ...common, detail: "managed original cannot be verified" };
+      return { status: sha256(desired.patchedSource) === stored.patchedSha256 ? "already-patched" : "update-available", ...common };
     }
     if (
       currentSha256 === stored.originalSha256 &&

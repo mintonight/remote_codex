@@ -141,6 +141,7 @@ describe("official Codex inline mention compatibility", () => {
     await writeFile(current.target, olderPatched, "utf8");
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
 
+    await expect(inspectCodexInlineMentionCompatibility(options)).resolves.toMatchObject({ status: "update-available" });
     await expect(enableCodexInlineMentionCompatibility(options)).resolves.toMatchObject({
       status: "patched",
       changed: true,

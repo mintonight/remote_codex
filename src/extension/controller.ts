@@ -123,7 +123,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const WORKBENCH_DROP_ONBOARDING_KEY =
-  "codexRemoteBridge.workbenchDropOnboardingFingerprint.v2";
+  "codexRemoteBridge.workbenchDropOnboardingFingerprint.v3";
 const APP_SERVER_SESSION_BOOTSTRAP_KEY =
   "codexRemoteBridge.appServerSessionBootstrapFingerprint.v1";
 
@@ -387,6 +387,7 @@ export class BridgeController implements vscode.Disposable {
       vscode.commands.registerCommand("codexRemoteBridge.acceptWorkbenchDrop", (payload) =>
         this.addWorkbenchCodexContext(payload),
       ),
+      vscode.commands.registerCommand("codexRemoteBridge.dropReady", () => !this.#shutdown),
       vscode.commands.registerCommand(REMOTE_OUTPUT_COMMAND, (event) =>
         this.#transport.handleOutput(event),
       ),
@@ -796,7 +797,7 @@ export class BridgeController implements vscode.Disposable {
       return;
     }
 
-    const patchableStatuses = new Set(["disabled", "already-restored", "already-patched"]);
+    const patchableStatuses = new Set(["disabled", "already-restored", "already-patched", "update-available"]);
     if (
       !patchableStatuses.has(workbench.status) ||
       !patchableStatuses.has(inlineMention.status)
@@ -807,12 +808,12 @@ export class BridgeController implements vscode.Disposable {
       return;
     }
 
-    await this.#context.globalState.update(WORKBENCH_DROP_ONBOARDING_KEY, fingerprint);
     if (
       workbench.status === "already-patched" &&
       inlineMention.status === "already-patched" &&
       this.#dropConsent.enabled()
     ) {
+      await this.#rememberWorkbenchDropOnboardingDecision();
       this.#log("native Codex drop onboarding: compatibility layer already enabled");
       return;
     }
@@ -832,10 +833,12 @@ export class BridgeController implements vscode.Disposable {
       { modal: true },
       "Enable",
     );
-    await this.#rememberWorkbenchDropOnboardingDecision();
     if (confirmation !== "Enable") {
+      await this.#rememberWorkbenchDropOnboardingDecision();
       return;
     }
+    // Failed installation must remain retryable; only a decline or success is remembered.
+    await this.#context.globalState.update(WORKBENCH_DROP_ONBOARDING_KEY, undefined);
     const automaticAuthorizationWasEnabled =
       this.#dropConsent.enabled();
     try {
@@ -928,25 +931,17 @@ export class BridgeController implements vscode.Disposable {
       return;
     }
 
+    await this.#rememberWorkbenchDropOnboardingDecision();
     if (!compatibilityChanged) {
       void vscode.window.showInformationMessage(
         "The native Codex drop surface is already enabled.",
       );
       return;
     }
-    this.#log("native Codex drop compatibility enabled; reloading the window automatically");
+    this.#log("native Codex drop compatibility enabled; manual window reload required");
     void vscode.window.showInformationMessage(
-      "Codex Bridge enabled cursor-positioned @ mention drops. Reloading VS Code automatically.",
+      "Codex Bridge enabled cursor-positioned @ mention drops. Reload VS Code manually to finish.",
     );
-    try {
-      await this.#reloadWindow();
-    } catch (error) {
-      const bridgeError = asBridgeError(error, "COMMAND_DENIED");
-      this.#log(`automatic reload after native Codex drop enable failed: ${bridgeError.message}`);
-      void vscode.window.showErrorMessage(
-        `Codex Bridge enabled native drops, but could not reload VS Code automatically: ${bridgeError.message}`,
-      );
-    }
   }
 
   async disableWorkbenchDrop(): Promise<void> {

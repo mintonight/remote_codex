@@ -46,7 +46,7 @@ class FakeElement {
   setAttribute(): void {}
 }
 
-function contributionFixture(): {
+function contributionFixture(connected = true): {
   commandService: { executeCommand: ReturnType<typeof vi.fn> };
   document: {
     body: { appendChild: ReturnType<typeof vi.fn> };
@@ -55,7 +55,8 @@ function contributionFixture(): {
     listeners: Map<string, DragListener>;
     querySelectorAll: () => FakeElement[];
   };
-  instance: { overlay?: FakeElement };
+  instance: { overlay?: FakeElement; readyUntil: number; peer: { postMessage: ReturnType<typeof vi.fn> } };
+  peer: { postMessage: ReturnType<typeof vi.fn> };
   pane: FakeElement;
   window: { listeners: Map<string, DragListener> };
 } {
@@ -106,6 +107,8 @@ function contributionFixture(): {
     consoleValue: { error: ReturnType<typeof vi.fn>; info: ReturnType<typeof vi.fn> },
   ) => new (service: { executeCommand: ReturnType<typeof vi.fn> }) => {
     overlay?: FakeElement;
+    readyUntil: number;
+    peer: { postMessage: ReturnType<typeof vi.fn> };
   };
   const Contribution = createContribution(
     document,
@@ -117,8 +120,11 @@ function contributionFixture(): {
   );
   const commandService = { executeCommand: vi.fn() };
   const instance = new Contribution(commandService);
+  const peer = { postMessage: vi.fn() };
+  instance.peer = peer;
+  instance.readyUntil = connected ? Date.now() + 1500 : 0;
   pointElement = pane;
-  return { commandService, document, instance, pane, window };
+  return { commandService, document, instance, peer, pane, window };
 }
 
 describe("managed Workbench Codex drop patch", () => {
@@ -151,10 +157,10 @@ describe("managed Workbench Codex drop patch", () => {
       "candidate(e){return!!e&&(this.supported(e)||this.types(e).length===0)}",
     );
     expect(inspected.patchedSource).toContain(
-      'onDragEnter(e){let t=this.paneFromEvent(e);this.trace("enter",e,t);if(!t||!this.candidate(e.dataTransfer))return;this.show(t);this.accept(e)}',
+      'this.refreshPeer();if(!this.ready()){this.hide();return}',
     );
     expect(inspected.patchedSource).toContain(
-      'onDragOver(e){let t=this.paneFromEvent(e);this.trace("over",e,t);if(!t||!this.candidate(e.dataTransfer))return;this.show(t);this.accept(e)}',
+      'if(!t||!this.candidate(e.dataTransfer))return;this.show(t);this.accept(e)}',
     );
     expect(inspected.patchedSource).toContain(
       "i===this.overlay&&this.activePane",
@@ -167,7 +173,7 @@ describe("managed Workbench Codex drop patch", () => {
       "onDrop(e){let t=this.paneFromEvent(e),i=t?this.payload(e):void 0;",
     );
     expect(inspected.patchedSource).toContain(
-      'if(!t||!i){this.hide();return}this.accept(e)',
+      'if(!this.ready()||!t||!i){this.hide();return}this.accept(e)',
     );
     expect(inspected.patchedSource).toContain(
       "register(CodexRemoteBridgeWorkbenchDrop.ID,CodexRemoteBridgeWorkbenchDrop,Lifecycle.AfterRestored)",
@@ -281,6 +287,7 @@ describe("managed Workbench Codex drop patch", () => {
     const listener = fixture.window.listeners.get("message");
 
     listener?.({
+      source: fixture.peer,
       data: {
         channel: "codex-remote-bridge-webview-drop-v1",
         phase: "dragenter",
@@ -289,6 +296,7 @@ describe("managed Workbench Codex drop patch", () => {
     expect(fixture.instance.overlay?.style.display).toBe("flex");
 
     listener?.({
+      source: fixture.peer,
       data: {
         channel: "codex-remote-bridge-webview-drop-v1",
         payload: {
@@ -304,6 +312,28 @@ describe("managed Workbench Codex drop patch", () => {
       "codexRemoteBridge.acceptWorkbenchDrop",
       expect.objectContaining({ uriList: "file:///home/test/Documents/manual.pdf" }),
     );
+  });
+
+  it("does not consume drops until both the Webview and extension handler are ready", async () => {
+    const fixture = contributionFixture(false);
+    const drop = { target: fixture.pane, dataTransfer: { files: [], types: ["text/uri-list"], getData: () => "file:///work/file.txt" }, preventDefault: vi.fn(), stopPropagation: vi.fn(), stopImmediatePropagation: vi.fn() };
+    fixture.document.listeners.get("drop")?.(drop);
+    expect(drop.preventDefault).not.toHaveBeenCalled();
+    fixture.commandService.executeCommand.mockRejectedValueOnce(new Error("No handler"));
+    const probe = { source: fixture.peer, data: { channel: "codex-remote-bridge-webview-drop-v1", phase: "probe", nonce: "fixture" } };
+    fixture.window.listeners.get("message")?.(probe);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(fixture.peer.postMessage).not.toHaveBeenCalled();
+    fixture.commandService.executeCommand.mockResolvedValue(true);
+    fixture.window.listeners.get("message")?.(probe);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(fixture.peer.postMessage).toHaveBeenCalledWith({ channel: "codex-remote-bridge-webview-drop-v1", phase: "ready", nonce: "fixture" }, "*");
+    fixture.document.listeners.get("drop")?.(drop);
+    expect(drop.preventDefault).toHaveBeenCalledOnce();
+    fixture.instance.readyUntil = 0;
+    drop.preventDefault.mockClear();
+    fixture.document.listeners.get("drop")?.(drop);
+    expect(drop.preventDefault).not.toHaveBeenCalled();
   });
 
   const installedWorkbench =

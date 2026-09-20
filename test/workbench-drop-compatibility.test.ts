@@ -209,6 +209,7 @@ describe("managed VS Code Workbench drop compatibility", () => {
       writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`),
     ]);
 
+    await expect(inspectWorkbenchDropCompatibility(options)).resolves.toMatchObject({ status: "update-available" });
     await expect(enableWorkbenchDropCompatibility(options)).resolves.toMatchObject({
       status: "patched",
       changed: true,
