@@ -345,6 +345,18 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M02 项目根、附件与 Core 本地诱饵
 
+- 0.3.87 握手修复：两端补丁和新 Bridge 均安装后手动重载，双来源文件/目录各 3 次。
+  当前已安装 0.3.87、实际应用两端补丁，原件/补丁/product checksum 均核验通过；
+  完整检查 490 passed / 7 skipped，安装后定向 55 passed。尚未代替用户重载窗口。
+  额外验证初次拖入、停留超过 2 秒后放下、侧栏隐藏再显示；禁用接收端时原生拖放不能
+  被补丁抢走。安装失败应允许再次启用，用户明确拒绝则不重复弹窗。静态及定向测试
+  不能替代这一组真实 UI 验收。
+
+- 2026-09-17：VS Code 升级为 1.138.0 后，Workbench 为未打补丁的官方资产，而 Codex
+  26.5908.31748 的引用补丁仍匹配受管哈希。需完成启用确认/系统授权/重载，再执行
+  Explorer 与系统文件管理器的文件/目录各 3 次拖入、唯一 @、turn 读取与再次重载。
+  35 项定向测试通过不等于拖放已经恢复；详见 acceptance/2026-09-17-drop-upgrade-recheck.md。
+
 - 待恢复与补测（2026-09-08）：用户确认 Explorer 与系统文件管理器拖放均完全无响应。
   当前 VS Code `1.136.1` 的 Workbench 没有受管补丁，原厂 product checksum 匹配；
   官方扩展 `26.5901.22334` 的 Webview 补丁及备份 SHA-256 匹配。最新激活记录另有
@@ -518,6 +530,74 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M11 生命周期、设置恢复与安全扫描
 
+- 提交前复核：2026-09-11T05:06:39.672Z 的重启回执为 failed，原因是未在时限内
+  确认桌面/适配器；但 05:06:10.526Z 已有 desktop shared_attached 成功审计，目标
+  service 883494/native 189420。需核对检测与实际 UI 差异，不能把它当作已验收或
+  断言应用完全未启动。真实 Remote SSH 提交/推送门禁仍缺少本轮现场证据。
+
+- 0.3.86 常用桌面图标：核对 GIO 解析的是用户级 chatgpt.desktop，其 Exec 为共享
+  启动器；已备份的自定义入口卸载时逐字节恢复。用户已授权仅退出旧桌面主进程，
+  由独立助手执行并写 desktop-client/restart.json；仅 shared-client-ready 能表示
+  新桌面及 Shim 已启动且审计确认共享接入，不能把启动器退出码等同于 UI 验收。
+
+- 0.3.85：等待原桌面任务完成，用户退出旧桌面端并从 ChatGPT (Shared Codex) 新入口
+  启动；VS Code 手动重载。核对 client.shared_attached/client.callback_route，验证原
+  thread 回到同 native PID、双项目不会被错误过滤、桌面工具可用；双端轮流断开、
+  排队、追加、停止和待审批恢复均须验收。安装脚本不能代替这次首次重启。
+
+- 0.3.84 新现场：VS Code 已连接 service 883494/native 189420，但桌面端 native
+  326107 对同 thread/resume 返回 active writer。桌面跨客户端项仍失败，不能作为
+  已通过关闭。需完成桌面所有项目与 VS Code 的统一后台接入及首次有序迁移，再由
+  用户手动重启桌面端验收；详见 `acceptance/2026-09-10-local-service-desktop-writer-conflict.md`。
+
+- `0.3.84` 独立服务候选：由用户重载相关本地窗口，核对多个客户端对应同一个服务和
+  native PID。执行长任务时连续重载 3 次，非前台线程自动恢复订阅，后台不被取消；
+  第二客户端追加、停止、官方队列及接回审批均可用。记录前后台一致性、服务身份和
+  审计，验证慢客户端只断开自身。服务全退出、升级排空、Remote SSH transport
+  重绑定和 Windows 实机仍待补测；不能把离线二进制测试等同于 UI 或灰屏验收。
+
+- 21:59:38 再次灰屏，三个 renderer 转储均为同一 Build ID 和 `code+0x3f73f8c`。
+  当前 `0.3.83` 仍失败，后台原线程状态 active，暂不重载或终止。待用户确认后执行可
+  回滚的原版前端资产对照；不同时变更 GPU、版本和补丁。另核对缺失的恢复周期审计。
+  见 `acceptance/2026-09-08-recurrent-renderer-crash-comparison.md`。
+- `0.3.83` 覆盖官方扩展升级把旧运行时移动、删除后仍存活的场景。应选回原持有者
+  `105310`，新描述符含设备/inode 身份，不能再只接管空实例 `189420`。旧记录私有凭据、
+  argv 或 socket 所属验证失败时，不得猜测、终止进程或清除记录。需真实升级/重载验收。
+- `0.3.82` 修复真实窗口启动时未先读取工作区而漏接旧实例的问题。验收应在未继承
+  `CODEX_BRIDGE_LOCAL_WORKSPACE_ROOT` 的情况下，从当前 Extension Host 记录解析根，
+  再出现 `app_server.handoff`；不得先以启动器 home 目录 spawn 后才改成项目目录。
+  需验证“旧实例持有线程 + 新空实例”仍接管正确持有者，多个非空实例不猜测。
+- 用户明确灰屏常在展开命令及结果详情时触发，需采集该卡片对应的 item/turn、输出
+  大小和渲染样本；不要求用户再次触发崩溃来提供标题，当前尚未对详情渲染宣称修复。
+- `0.3.81` 预防性修正待验收：确认自动恢复不再出现 `includeTurns=true` 或合成的完整
+  线程快照，背景订阅使用 `excludeTurns=true`，不重复订阅前台会话。核对
+  `thread.recovery.cycle` 的真实周期计数、状态变更与无正文审计，并在同一长对话持续
+  生成期间观察 UI 和新 Crashpad 转储。不得以合成压力测试或自动重载代替灰屏根因修复。
+- 用户确认 `Developer: Reload Webviews` 无法恢复本次灰屏；没有新增 Codex 初始化或
+  崩溃转储。已记录 app-server `105310` 的完整窗口重载前基线，并请用户仅重载 Zklab
+  窗口；恢复与同进程接管结果待补测。见 `acceptance/2026-09-08-webview-reload-failed.md`。
+- 2026-09-08 18:19:36 灰屏现场已确认 renderer PID `104346` 原生崩溃，主窗口和
+  app-server 存活，原线程只读查询为 idle。已请用户执行 `Developer: Reload Webviews`
+  验证局部恢复，结果待补测；需匹配符号和受控对照后才能归因。见
+  `acceptance/2026-09-08-codex-webview-renderer-crash.md`。不要提交或上传原始转储。
+- 灰屏专项待复现：用户报告 Codex 经常灰屏，历史日志另有共享 Extension Host 无响应。
+  用户已确认仅右侧 Codex 区域受影响，目前不在灰屏状态。
+  记录灰屏的准确时间、影响范围及恢复方式，采集对应 renderer/Webview 错误和扩展宿主
+  性能样本后再归因；不能把 ResizeObserver 上报位置当作责任归属，或用后台进程健康
+  代替前台渲染验收。见 `acceptance/2026-09-08-codex-gray-screen-triage.md`。
+- 2026-09-08 首次用户重载复核：已运行 `0.3.80` Shim，原线程已加载为 idle，本次没有
+  writer conflict 或 recovery error；只有一个空闲线程且没有 handoff 审计，后台运行
+  保活尚未验收。前端启动时有 42 条 ResizeObserver 错误，需对照用户症状进一步定位。
+  见 `acceptance/2026-09-08-session-recovery-first-reload.md`。
+- `0.3.80` Linux 本地窗口候选：同时运行前台 A 和非前台 B，切换到另一个对话后重载，
+  连续 3 轮验证 B 自动重新出现并继续更新，两个线程 ID、后台 app-server PID 保持不变，
+  不出现 writer 冲突或重复 turn。另运行长对话，核对前台显示和后台最新项，验证 30 秒
+  快照校正、WS 心跳失败重连、输出堵塞恢复及完成态补齐。截图或旧日志不替代本轮操作。
+- 关闭窗口后保留后台运行任务；接管期后重开窗口，确认仅回收可验证空闲实例。
+  独立 ChatGPT App/CLI、其他工作区和已由新 Shim 接管的实例不得被清理；实际状态未知
+  时不得假设空闲。所有 VS Code 窗口均关闭期间不声称 Controller 定时维护仍在运行。
+- Remote SSH 的 app-server 保活接管目前未开启，需先验证重载后动态工具及 MCP
+  transport 重绑；Windows 需要原生进程身份/接管实现和独立实机验收。
 - 覆盖旧 Shim/Executor 迁移、必要重载、独立停止、恢复驱动停止和重新启用。
 - 分别执行客户端断开、Controller 停止、relay 断开、窗口关闭和 Extension Host 退出。
 - 每种关闭方式核对 Shim、relay、MCP、后台任务和远端命令遗留进程数。

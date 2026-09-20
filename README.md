@@ -6,7 +6,7 @@ Codex Remote Bridge 让官方 Codex VS Code 扩展及其内置 app-server 保持
 同时把经过授权的项目操作路由到当前 VS Code Remote SSH 工作区。默认链路复用 VS Code
 已经建立的远程连接，不读取 SSH 密码或私钥，也不会在远端启动 Codex。
 
-> 当前源码版本为 `0.3.79` 候选。已取消 Bridge 自定义的资源管理器右键添加入口和远端
+> 当前源码版本为 `0.3.87` 候选。已取消 Bridge 自定义的资源管理器右键添加入口和远端
 > 快照附件；官方输入区的原生 `@` 文件搜索通过当前 VS Code Remote SSH 工作区查询，
 > 不访问本机控制目录。可选兼容层不要求用户按住 `Shift`：VS Code Explorer 拖放转换为
 > 当前光标处的原生 `@` 引用；无论来自 VS Code Explorer 还是系统文件管理器，文件和
@@ -62,6 +62,39 @@ Codex Remote Bridge 让官方 Codex VS Code 扩展及其内置 app-server 保持
 - 官方扩展、内置 Codex、Controller、Shim 和 Executor 组成兼容集合，但版本值只用于
   诊断和回归触发，不作为运行时接纳条件。
 
+### Linux 本地独立服务
+
+Linux 本地使用统一回调入口，按 `CODEX_HOME` 隔离配置域，不按客户端独占会话。
+有历史执行实例时，通过官方 loaded-thread 索引把同 thread 的请求送回原实例；
+不强制搬迁正在执行的任务。没有实例时才启动用户级服务，Linux `flock` 防止并发
+冷启动产生两个新后台。过渡期允许多个旧实例分别执行不同线程，不允许同线程双写。
+客户端请求分配唯一 wire ID，响应按回调返回，审批采用首次回答生效的独立映射。
+断开只取消投递、不主动中断任务；超时明确表示结果未知，不自动重发写请求。
+同线程有序请求只等待 ACK，追加和停止绕过普通队列，不能被长任务堵住。
+
+每个 thread 的单执行流由官方 app-server 管理。Bridge 原样保留 `thread/queue/*`、
+`turn/start`、`turn/steer` 和 `turn/interrupt`，不把队列确认伪造成已经启动的 turn，
+不在断线后自动重发写请求。新任务排队使用官方队列接口，不把所有 `turn/start` 静默
+改成排队。VS Code 保留当前工作区的任务列表过滤，桌面端保留全部项目。
+桌面 CLI 的 TOML 配置按结构解析，随 thread/start、resume、fork 传给原生服务，
+保留桌面工具 MCP 及其运行期连接配置，不把旧窗口配置直接写进共享全局配置。
+
+无客户端、无孤立执行连接，且官方索引确认没有 loaded thread，持续 30 分钟后退出。
+已认证客户端可用 `bridge/service/status` 查询；`bridge/service/stop` 在还有其他
+客户端、loaded thread 或未知任务时拒绝退出。服务崩溃后可校验并接回仍存活的 native
+app-server。首次迁移时，仍活跃的旧窗口须由用户重载；不按进程名批量终止后台。
+受管历史 journal 中身份和配置域均可验证的存活 native 实例也可直接接入；未受管
+桌面后台不会被扫描接管或终止。Remote SSH 与 Windows 尚未切换统一回调入口。
+
+完成构建后运行 `npm run desktop:install`，安装共享启动器及独立的
+**ChatGPT (Shared Codex)** 入口，同时创建同名 `chatgpt.desktop` 用户级覆盖，让
+原来的 ChatGPT 图标也使用共享启动器。系统安装文件不变；已有用户自定义入口先
+逐字节备份，卸载时恢复，没有原用户入口则删除覆盖以恢复系统入口。用户修改后的
+文件不会被强行覆盖或删除。安装本身不退出应用；旧进程必须真正退出才会切换后台。
+经用户明确确认后，可按 PID、启动时间及可执行文件身份核验，仅对旧桌面主进程发送
+SIGTERM，再从共享启动器打开；不会升级为 SIGKILL，也不向 VS Code、训练或共享后台
+发送结束信号。真实 UI 的长对话仍须验收。
+
 ## 主要能力
 
 - 自动识别单根 Remote SSH 工作区；每次初始化核对远端实际包版本，不一致时通过活动
@@ -89,7 +122,7 @@ Codex Remote Bridge 让官方 Codex VS Code 扩展及其内置 app-server 保持
   文件不扩大到父目录，目录只允许读取自身子树，未拖入路径不会被预先开放。随后由本地
   `workspace_*` 只读工具分析。扩展激活会按当前 VS Code
   与官方 Codex 资产组合自动检查兼容性；首次可安全启用时只弹出一次明确确认，确认后
-  自动请求所需系统文件权限并重载窗口。Bridge 会为 Workbench、
+  请求所需系统文件权限，完成后提示用户手动重载窗口。Bridge 会为 Workbench、
   `product.json` 和官方 Webview 资产保存带 SHA-256 的可恢复原件。VS Code 或官方 Codex
   正常升级替换旧资产后，Bridge 会以安装身份、当前产品校验和、代码能力和旧备份共同确认
   升级边界，清理过期托管状态并对新资产重新请求一次兼容确认；同版本外部改写仍失败关闭。
@@ -182,7 +215,7 @@ Remote SSH Codex 继承本机 VS Code 用户可访问的全部文件和进程能
 1. 扩展激活后会自动检查当前 VS Code 与官方 Codex 资产。检测到兼容且尚未启用的原生
    拖放接收面时，Bridge 只对该资产组合弹出一次确认；该确认同时允许 Remote SSH 窗口
    自动授权用户之后明确拖入的本机文件或目录。确认后自动请求所需系统文件权限，
-   Linux 系统安装会出现 polkit 授权框，补丁成功后窗口自动重载。拒绝或关闭确认后不会
+   Linux 系统安装会出现 polkit 授权框，补丁成功后由用户手动重载。拒绝或关闭确认后不会
    对同一资产组合重复打扰，可随时从命令面板执行
    `Codex Bridge: Enable Native Codex Drop Surface` 手动重试。VS Code 或官方 Codex 扩展
    升级后会重新探测；经产品身份和当前校验和确认的正常升级会丢弃旧托管状态，再对新资产
@@ -339,6 +372,84 @@ Remote SSH 实机验证。完整门禁和量化指标见
 
 ## TODO
 
+- 2026-09-19 候选归档复核：实机/双平台门禁仍未闭环，源码按本次明确的提交推送请求
+  保存，不代表正式发布。历史审计另见同一本地工作区在短时间内重复 shim.start，需
+  结合退出码和 Extension Host 日志确认是否重启循环；退出条件为启动、重载及静置
+  样本稳定，无非预期重复启动。证据与验证边界见
+  `docs/acceptance/2026-09-19-candidate-source-push.md`。
+
+- `0.3.87` 拖放半启用防护已实现：Webview/Workbench/Bridge 命令握手、短时有效确认、
+  失联原生回退、受管旧补丁更新探测、安装失败允许重试，以及手动重载。当前安装
+  Webview 的探针不再绑定旧版本路径。退出条件为完成系统授权、实装补丁与手动重载，
+  Explorer/系统文件管理器文件和目录各 3 次、唯一 @ 引用和实际读取均通过，再验证
+  禁用一端时不吞原生拖放及再次重载恢复。见 `docs/acceptance/2026-09-17-release-0.3.87-drop-handshake.md`。
+
+- `0.3.86` 默认桌面入口修复：新现场确认桌面已重启，但未携带共享环境，仍走原后台。
+  用户级默认图标覆盖、原件恢复、身份保护重启与接入回执已实现。退出条件：用户常用
+  图标启动的主进程和其 Shim 均带共享标记，审计出现新的 desktop shared_attached，
+  同 thread 不再返回 active writer，旧入口自定义内容可逐字节恢复。重启得到用户授权，
+  结果见 `docs/acceptance/2026-09-10-release-0.3.86-default-desktop-entry.md`。
+  提交前复核发现 restart.json 为 failed，但同一轮存在 desktop shared_attached 成功
+  审计；必须核对重启助手检测与实际 UI 的差异，不能把回执失败或接入成功单独当作
+  全流程结论。补充证据见 `docs/acceptance/2026-09-10-candidate-commit-preflight.md`。
+
+- `0.3.85` 桌面端与 VS Code 统一回调入口已实现，待真实双端验收。已核对官方
+  daemon/control socket；桌面启动同时含运行期 MCP 配置，不能只启用 daemon 开关。
+  当前按配置域发现，并将已有线程路由回原执行实例，避免为解除冲突强杀旧后台。
+  退出条件为从新桌面入口启动后，
+  双端同线程查看、排队、追加、停止、审批与轮流重载均通过，其他项目不受影响，
+  跨旧实例的非前台 active 线程订阅恢复通过，旧 writer 有序迁移且不删除锁或会话数据。现场见
+  `docs/acceptance/2026-09-10-local-service-desktop-writer-conflict.md`。
+  当前源码和官方二进制回归见 `docs/acceptance/2026-09-10-release-0.3.85-callback-routing.md`。
+
+- 依赖安全复核：本轮 npm audit 返回 7 项（3 high、4 moderate），涉及既有
+  fast-uri/ajv、js-yaml、hono、qs、vitest/@vitest/mocker；新增 smol-toml 未被列为漏洞。
+  退出条件为分别评估运行期/构建期暴露、定向修复并重跑完整检查，不执行无审查的
+  audit fix --force，也不能声明安全发布门禁已通过。
+
+- `0.3.84` Linux 本地独立服务候选：自动化覆盖并发发现、单后台、多客户端审批、断线
+  不取消、空服务退出；当前官方二进制已离线验证两个线程、客户端重启及服务崩溃后的
+  同 native PID 接管。退出条件：安装候选后，在实际 VS Code 中连续 3 次长任务重载，
+  前台与非前台线程继续更新、无 writer 占用冲突；双客户端排队、追加、停止和审批均
+  符合官方语义，慢客户端不拖垮其他客户端。原生队列长 turn 的实模型执行、Remote SSH
+  transport 重绑定、Windows 生命周期、服务升级排空仍待补测/实现；详情见
+  `docs/acceptance/2026-09-10-release-0.3.84-local-service.md`。不把此项等同于灰屏修复。
+
+- Linux 本地窗口后台会话恢复候选 `0.3.83`：先解析当前 Extension Host 发布的工作区，
+  再接管可验证的旧 app-server；禁止用启动器 cwd 猜测项目或抢先启动竞争实例。分页发现
+  已加载线程，只为非前台运行线程恢复不携带历史的订阅；每 30 秒同步去重后的轻量运行
+  状态，不再读取并重放完整历史、不重发 turn。退出条件是 M11 中后台/前台双线程连续
+  重载 3 轮、长时间生成保持前台更新且不再产生 renderer 崩溃、
+  空闲回收和独立 App/CLI 不受影响均通过。Remote SSH 的动态工具/MCP transport 重绑及
+  Windows 原生后台接管尚未开启，须独立实现和验收；同根只有一个实例持有线程、其余
+  经协议确认为空时接管持有者，多份实例都持有线程时仍拒绝猜测。证据见
+  `docs/acceptance/2026-09-08-release-0.3.83-deleted-runtime-identity.md`。当前 Windows Controller
+  包缺失，补齐原生构建产物和双平台集合校验前不得发布。
+  首次用户重载已确认新 Shim 和原空闲线程加载，但尚无后台运行样本；另观察到官方
+  前端 `ResizeObserver` 错误集中出现。需对照前台症状、renderer 日志与快照时间复核，
+  退出条件是长对话显示持续更新且后台/前台状态一致，不能以进程 ready 代替 UI 验收。
+  本次证据见 `docs/acceptance/2026-09-08-session-recovery-first-reload.md`。
+  用户另报告经常灰屏；历史日志有扩展宿主无响应，尚不能归因到 Codex、Bridge 或其他
+  扩展。须对齐灰屏时刻、面板/整窗范围和性能样本，定位后验证灰屏不再复现且后台会话
+  不丢失，见 `docs/acceptance/2026-09-08-codex-gray-screen-triage.md`。
+  18:19:36 的新现场已取得 renderer PID `104346` 崩溃转储，后台会话仍可读；需完成
+  匹配符号解析、Webview 恢复与根因隔离，不能用后台快照校正代替 renderer 崩溃修复。
+  证据见 `docs/acceptance/2026-09-08-codex-webview-renderer-crash.md`；原始转储不得加入 Git。
+  本次 `Reload Webviews` 已确认不能恢复灰屏；需验证完整窗口重建后的页面恢复与后台
+  同进程接管，见 `docs/acceptance/2026-09-08-webview-reload-failed.md`。
+  `0.3.81` 移除 `0.3.80` 引入的周期性完整快照，降低长对话重复序列化和前台更新负载；
+  这不是已经证实的原生崩溃根治，仍需匹配符号或长对话现场对照确认触发原因。
+  用户已补充灰屏常在展开命令/结果详情时触发；须针对该详情项的惰性加载、输出大小和
+  渲染路径复现验证，不能把工作区接管修复或快照减负当作详情展开崩溃已修复。
+  官方升级移动并删除旧可执行文件时，PID 可能仍存活并持有 writer；`0.3.83` 以启动
+  身份及设备/inode 识别这类进程。旧记录需经原始 argv、监听 socket 所属和私有协议鉴别
+  后迁移；证据不足时保留记录并明确失败，不得静默选空实例或删除恢复凭据。
+  最新三次灰屏的 renderer 转储已确认落在同一原生指令偏移，`0.3.83` 仍复现；暂停将
+  接管修复视为灰屏方案。待用户同意后做原版 Workbench/Webview 对照，并取得匹配符号
+  或最小复现证据，见 `docs/acceptance/2026-09-08-recurrent-renderer-crash-comparison.md`。
+  实机未见 `thread.recovery.cycle` 审计，须核对初始化通知是否实际启动恢复轮询，退出
+  条件是当前官方客户端下真实产生周期计数并验证后台线程订阅；不得以单元测试代替。
+
 ### Codex 原生上下文入口
 
 - `0.3.79` 候选修复窗口重载后旧官方 app-server 遗留并占用 thread writer 的问题。Shim
@@ -406,7 +517,7 @@ Remote SSH 实机验证。完整门禁和量化指标见
   另需区分仅含 `data:` URI 的图片拖放与文件路径拖放，避免吞掉无法处理的原生拖放，
   诊断不得输出图片载荷；将绑定旧扩展路径而跳过的实装测试改为当前资产能力探测。
   退出条件和本次静态证据见
-  [2026-09-08 升级复核](docs/acceptance/2026-09-08-release-0.3.79-drop-recheck.md)。
+  `docs/acceptance/2026-09-08-release-0.3.79-drop-recheck.md`。
 - `0.3.77` 候选按当前产品决策取消全部本机路径授权机制：Remote SSH 配置会直接加入覆盖
   本机文件系统根的 `local-full-access`，Core 权限固定为 `full-access`，本机文件、Shell、
   进程和服务端审批请求不再被 Bridge 阻断；Core 审批请求由 Shim 自动接受，远端命令、
