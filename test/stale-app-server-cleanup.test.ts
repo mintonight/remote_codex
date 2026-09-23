@@ -98,6 +98,7 @@ function options(
     directory,
     hostPlatform: "linux",
     inspectProcesses,
+    isProcessAlive: () => false,
     wait: async () => undefined,
     canRetireAppServer: async () => true,
     ...overrides,
