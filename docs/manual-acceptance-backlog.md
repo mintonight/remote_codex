@@ -1,6 +1,28 @@
 # 统一人工补测清单
 
-更新日期：2026-08-02
+更新日期：2026-09-22
+
+## 0.3.88 桌面启动恢复待验收
+
+- 2026-09-22 用户明确反馈桌面端已无问题；单次恢复可用已确认，不替代以下重复启动
+  和详细命令显示的专项验收。
+- 连续 3 次重开：记录 initialize 耗时和 desktop shared_attached，复用原共享服务和
+  native PID，不再发生 20 秒启动超时，不产生第二个 native writer。
+- 启动恢复后用户明确要求详细显示命令，已重新启用 STEPS_COMMANDS。确认具体命令
+  条目、展开输出、完成后保留和手动重开后设置生效；不把配置解析成功、只读探针或
+  进程存在当作界面验收。回退为 STEPS_PROSE 只是故障隔离步骤，不是最终方案。
+- VS Code 原安装仍为 0.3.87，同样报 Local service did not become ready；现已安装
+  同一已验证 0.3.88 Linux Controller VSIX，安装版本和 Shim 哈希均核对通过。
+  已观察到两个窗口手动 Reload Window 后使用新 Shim，初始化、会话列表及 thread/start
+  成功，并保留原共享服务/native PID。面板操作、正式 turn/start 和任务完成仍待验收。
+  不自动重载 VS Code/Remote SSH，不启动新的 SSH 认证；集成修复提交前仍须补齐
+  真实 VS Code/Remote SSH 任务和远端操作审计。
+- Windows 原生构建、Controller VSIX、实机运行及完整发布门禁均待补测。
+
+故障与候选证据：acceptance/2026-09-22-release-0.3.88-desktop-identity-recovery.md。
+详细显示重新启用记录：acceptance/2026-09-22-desktop-command-display-reenabled.md。
+VS Code 更新记录：acceptance/2026-09-22-vscode-0.3.88-install.md。
+两窗口重载结果：acceptance/2026-09-22-vscode-0.3.88-reload.md。
 
 ## 执行约定
 

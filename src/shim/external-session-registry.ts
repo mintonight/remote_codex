@@ -21,7 +21,7 @@ const LEGACY_EXECUTABLE_NAMES = new Set([
   "node.exe",
 ]);
 
-function parseDescriptor(
+export function parseDescriptor(
   value: unknown,
   directory: string,
   hostPlatform: NodeJS.Platform,

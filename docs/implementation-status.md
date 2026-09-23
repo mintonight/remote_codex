@@ -1,6 +1,23 @@
 # 实施状态
 
-更新日期：2026-09-19
+更新日期：2026-09-22
+
+## 0.3.88 Linux 桌面共享后台身份恢复候选
+
+桌面重开时发现共享后台仍可响应，但旧 journal 的墙钟启动时间与当前系统读数相差
+2002 ms，超过 2000 ms 门禁，导致发现结果为空，等待已有服务锁 20 秒后初始化失败。
+新增仅用于 Linux 活跃本地服务接入的恢复通路：复用结构化描述符解析，验证两端进程
+可执行文件 inode、真实 native 配置域、内核 TCP 监听 socket 的进程归属，随后用既有
+凭据执行 initialize 和 bridge/service/status，并再次核验进程存活身份和 socket。
+不扩大时间容差，不修改 journal，不生成新凭据，不启动竞争 native，不改变进程终止
+或孤立后台接管门禁。恢复失败保持拒绝，不将普通本地服务或其他配置域纳入接管。
+仅 root Controller/Shim 升到 0.3.88，Executor 保持 0.2.21。自动化与当前后台只读恢复
+证据见 acceptance/2026-09-22-release-0.3.88-desktop-identity-recovery.md；实际桌面重开、
+VS Code/Remote SSH 和 Windows 验收尚未完成，不代表正式发布。
+用户随后确认桌面端可用，并反馈 VS Code 面板仍打不开。现场官方 Codex 日志记录
+同一初始化超时，已核对 VS Code 仍装 0.3.87；现将已验证的 0.3.88 Linux VSIX 安装
+到 VS Code，待用户手动重载后验收，不更换已运行的桌面或共享后台。
+安装证据见 acceptance/2026-09-22-vscode-0.3.88-install.md。
 
 ## 0.3.87 候选源码归档
 

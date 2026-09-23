@@ -9,6 +9,7 @@ import { bridgeExternalCliDir } from "../core/locations.js";
 import { inspectProcessIdentities, processIdentitiesMatch, type ProcessIdentity } from "./process-identity.js";
 import { managedUpstream } from "./app-server-handoff.js";
 import { discoverExternalCliSessions } from "./external-session-registry.js";
+import { recoverLiveLocalService } from "./local-service-identity-recovery.js";
 import { ensureLocalService, userServiceKey } from "./local-app-server-service.js";
 import type { ExternalCliSessionDescriptor } from "./shared-app-server.js";
 import { RequestCallbackQueue } from "./request-callback-queue.js";
@@ -49,7 +50,16 @@ export async function localServicesInDomain(): Promise<ExternalCliSessionDescrip
       if (!isRecord(value) || value.host !== "local" || !isRecord(value.appServer) || value.pid !== Number(name.slice(0, -5))) continue;
       const nativePid = value.appServer.pid;
       if (result.some((peer) => peer.appServer?.pid === nativePid)) continue;
-      try { process.kill(Number(value.pid), 0); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue; }
+      let alive = true;
+      try { process.kill(Number(value.pid), 0); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+        alive = false;
+      }
+      if (alive) {
+        const recovered = await recoverLiveLocalService(value, directory, home);
+        if (recovered) result.push(recovered);
+        continue;
+      }
       const expected = value.appServer as unknown as ProcessIdentity;
       const actual = (await inspectProcessIdentities([expected.pid])).get(expected.pid);
       if (!processIdentitiesMatch(expected, actual)) continue;
