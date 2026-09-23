@@ -79,6 +79,18 @@ export function defaultRemotePrimaryRoot(
   };
 }
 
+export const REMOTE_HOME_ACCESS_ROOT_ID = "remote-home-access";
+
+export function remoteHomeAccessRoot(homeDirectory: string): WorkspaceRootConfig {
+  return {
+    id: REMOTE_HOME_ACCESS_ROOT_ID,
+    target: "remote",
+    role: "secondary",
+    path: normalizedRemoteRoot(homeDirectory, "remote home directory"),
+    displayName: "Remote user home",
+  };
+}
+
 function parseWorkspaceRoot(value: unknown, index: number): WorkspaceRootConfig {
   const name = `roots[${index}]`;
   if (!value || typeof value !== "object" || Array.isArray(value)) {

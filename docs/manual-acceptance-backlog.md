@@ -367,6 +367,23 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M02 项目根、附件与 Core 本地诱饵
 
+- `0.3.89` 远端用户目录与同 SSH authority 跨工作区拖放：Linux x64 候选已安装，
+  用户确认双向文件/目录拖入及任务读取通过。日志确认两窗口 `0.3.89` Shim、
+  Executor `0.2.22` 与 Codex 初始化，`x2_deploy` 接收另一个远端工作区目录，
+  远端文件附件成功，官方 `thread/start`、`turn/start` 进入 Shim，且
+  `remote-home-access` 的 `workspace_list_tree`、`workspace_read_file` 在远端成功。
+  反向接收、home 根显式命令、home 外与不同 authority 拒绝尚缺独立实机记录；
+  重连短暂 `ENOPRO` 和一次连接未建立需区分过渡与持续故障。仅路径而无同
+  authority URI 的跨工作区拖入应失败关闭。详见
+  acceptance/2026-09-22-release-0.3.89-remote-home-cross-workspace.md。
+
+- 2026-09-22 远程拖放复发：两端当前补丁/备份校验通过，且与当前生成器结果一致；
+  window7 最后激活早于 Webview 补丁写入，尚无后续重载或拖放捕获记录。请用户在
+  对应 Remote SSH 窗口手动重载，重连后核对唯一 @、完整捕获序列、remote=1 和
+  turn 实际远程读取，再回归文件/目录及再次重载。55 项定向测试通过不代表实机
+  恢复；window5 的本机目录成功记录不得用于远程验收。详见
+  acceptance/2026-09-22-remote-drop-recheck.md。
+
 - 0.3.87 握手修复：两端补丁和新 Bridge 均安装后手动重载，双来源文件/目录各 3 次。
   当前已安装 0.3.87、实际应用两端补丁，原件/补丁/product checksum 均核验通过；
   完整检查 490 passed / 7 skipped，安装后定向 55 passed。尚未代替用户重载窗口。

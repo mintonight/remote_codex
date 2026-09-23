@@ -70,10 +70,12 @@ export class VsCodeRemoteExecutor
   implements ControllerWorkspaceClient
 {
   readonly #activeSockets = new Set<Socket>();
+  readonly #transportWorkspaceRoot: string;
   #closed = false;
 
-  constructor(config: BridgeConfig) {
+  constructor(config: BridgeConfig, transportWorkspaceRoot = config.workspaceRoot) {
     super(config, unreachableSpawn);
+    this.#transportWorkspaceRoot = transportWorkspaceRoot;
     if (config.connectionMode !== "vscode-remote" || !config.vscodeTransport) {
       throw new BridgeError(
         "INVALID_CONFIG",
@@ -418,13 +420,15 @@ export class VsCodeRemoteExecutor
       id,
       operation,
       outputCommand: REMOTE_OUTPUT_COMMAND,
-      params,
+      params: this.#transportWorkspaceRoot === this.config.workspaceRoot
+        ? params
+        : { ...params, scopeRoot: this.config.workspaceRoot },
       policy: {
         commandTimeoutMs: this.config.commandTimeoutMs,
         maxOutputBytes: this.config.maxOutputBytes,
       },
       token: descriptor.token,
-      workspaceRoot: this.config.workspaceRoot,
+      workspaceRoot: this.#transportWorkspaceRoot,
     };
 
     return await new Promise<T>((resolve, reject) => {

@@ -66,6 +66,14 @@ vi.mock("vscode", () => {
       return this.path;
     }
 
+    with(change: { path?: string }): Uri {
+      const parsed = new URL(this.value);
+      if (change.path !== undefined) {
+        parsed.pathname = change.path;
+      }
+      return new Uri(parsed.toString());
+    }
+
     toString(): string {
       return this.value;
     }
@@ -138,6 +146,14 @@ const remoteRoot: WorkspaceRootConfig = {
   id: "remote-primary",
   path: "/home/zkbot/work/train/zklab/Zklab",
   role: "primary",
+  target: "remote",
+};
+
+const remoteHomeRoot: WorkspaceRootConfig = {
+  displayName: "Remote user home",
+  id: "remote-home-access",
+  path: "/home/zkbot",
+  role: "secondary",
   target: "remote",
 };
 
@@ -214,6 +230,37 @@ describe("WorkspaceResourceController", () => {
         "vscode-remote://ssh-remote%2Btest_40/home/zkbot/work/train/zklab/Zklab",
       ),
     };
+  });
+
+  it("opens a sibling workspace through the same Remote SSH authority and home root", async () => {
+    const canonicalRemoteHomePath = vi.fn(async (path: string) => path);
+    const controller = new WorkspaceResourceController(
+      () => config([remoteRoot, remoteHomeRoot]),
+      () => undefined,
+      canonicalRemoteHomePath,
+    );
+    const result = (await controller.execute(
+      request("openWorkspaceResource", remoteHomeRoot.id, {
+        path: "/home/zkbot/work/other/file.txt",
+      }),
+    )) as Record<string, unknown>;
+
+    expect(mock.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        value: "vscode-remote://ssh-remote%2Btest_40/home/zkbot/work/other/file.txt",
+      }),
+    );
+    expect(result.resourceUri).toContain("/remote-home-access/work/other/file.txt");
+    expect(canonicalRemoteHomePath).toHaveBeenCalledWith("/home/zkbot/work/other/file.txt");
+    await expect(controller.execute(
+      request("openWorkspaceResource", remoteHomeRoot.id, {
+        path: "/home/other/file.txt",
+      }),
+    )).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
+    canonicalRemoteHomePath.mockResolvedValueOnce("/etc/passwd");
+    await expect(controller.provideTextDocumentContent(
+      vscode.Uri.parse(result.resourceUri as string),
+    )).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
   });
 
   it("reuses the exact open Remote SSH workspace URI for an editor jump", async () => {

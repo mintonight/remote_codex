@@ -580,7 +580,9 @@ export class OpenSshExecutor {
       'test -d "$root"',
       'printf "%s\\0" "$(hostname)"',
       'tr -d "\\n" </etc/machine-id',
-      'printf "\\0%s" "$root"',
+      'home=$(realpath -e -- "$HOME")',
+      'test -d "$home"',
+      'printf "\\0%s\\0%s" "$root" "$home"',
     ].join("\n");
     const result = await this.execute(
       ["sh", "-c", script, "codex-bridge-probe", this.config.workspaceRoot],
@@ -592,8 +594,8 @@ export class OpenSshExecutor {
         stderr: result.stderr,
       });
     }
-    const [hostname, machineId, workspaceRoot] = result.stdout.split("\0");
-    if (!hostname || !machineId || !workspaceRoot) {
+    const [hostname, machineId, workspaceRoot, homeDirectory] = result.stdout.split("\0");
+    if (!hostname || !machineId || !workspaceRoot || !homeDirectory) {
       throw new BridgeError("PROTOCOL_MISMATCH", "Remote identity probe returned invalid output");
     }
     return {
@@ -601,6 +603,7 @@ export class OpenSshExecutor {
       hostname,
       machineId,
       workspaceRoot,
+      homeDirectory,
     };
   }
 

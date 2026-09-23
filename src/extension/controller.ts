@@ -6,7 +6,12 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { AuditLog } from "../core/audit-log.js";
 import { saveOfficialCodexRuntime } from "../core/codex-runtime-store.js";
-import { defaultRemotePrimaryRoot, parseBridgeConfig } from "../core/config.js";
+import {
+  defaultRemotePrimaryRoot,
+  parseBridgeConfig,
+  REMOTE_HOME_ACCESS_ROOT_ID,
+  remoteHomeAccessRoot,
+} from "../core/config.js";
 import { loadBridgeConfig, saveBridgeConfig } from "../core/config-store.js";
 import { asBridgeError, BridgeError } from "../core/errors.js";
 import {
@@ -321,6 +326,7 @@ export class BridgeController implements vscode.Disposable {
       (threadId, rootId) =>
         this.#conversationResources.find(threadId, rootId) ??
         (rootId === fullLocalAccessRoot().id ? fullLocalAccessRoot() : undefined),
+      (path) => this.#canonicalRemoteHomePath(path),
     );
     this.#transport = new VsCodeTransportServer(
       () => this.#sessionConfig ?? this.#config,
@@ -568,6 +574,7 @@ export class BridgeController implements vscode.Disposable {
     try {
       const result = await attachDroppedResourcesToCodex(resources, {
         log: (message) => this.logCodexContextDrop(message),
+        remoteHomePath: this.#remoteIdentity?.homeDirectory,
       });
       if (result.attachedCount === 0) {
         throw new BridgeError(
@@ -622,6 +629,7 @@ export class BridgeController implements vscode.Disposable {
       const parsed = parseWorkbenchDropPayload(
         payload,
         (message) => this.logCodexContextDrop(message),
+        this.#remoteIdentity?.homeDirectory,
       );
       const localResourcesReady = await this.#prepareDroppedLocalResources(
         parsed.resources,
@@ -1120,7 +1128,6 @@ export class BridgeController implements vscode.Disposable {
 
       this.#config = await this.#resolveCompatibleCodex(config);
       await saveBridgeConfig(bridgeConfigPath(), this.#config);
-      await this.#saveWindowSession(this.#config);
       this.#state.transition("connecting");
       await this.#connect();
       if (await this.#reloadForMissingAppServerSession(this.#config)) {
@@ -1218,7 +1225,6 @@ export class BridgeController implements vscode.Disposable {
         }),
       );
       await saveBridgeConfig(bridgeConfigPath(), this.#config);
-      await this.#saveWindowSession(this.#config);
       await this.#connect();
       if (await this.#reloadForMissingAppServerSession(this.#config)) {
         return;
@@ -1474,6 +1480,27 @@ export class BridgeController implements vscode.Disposable {
     await saveBridgeConfig(this.#sessionConfigPath, this.#sessionConfig);
   }
 
+  async #canonicalRemoteHomePath(path: string): Promise<string> {
+    const config = this.#sessionConfig;
+    const home = config?.roots.find((root) => root.id === REMOTE_HOME_ACCESS_ROOT_ID);
+    if (!config || !home || config.connectionMode !== "vscode-remote") {
+      throw new BridgeError("REMOTE_TRANSPORT_DISCONNECTED", "Remote home scope is unavailable");
+    }
+    const scoped = new VsCodeRemoteExecutor(
+      parseBridgeConfig({
+        ...config,
+        roots: [defaultRemotePrimaryRoot(home.path)],
+        workspaceRoot: home.path,
+      }),
+      config.workspaceRoot,
+    );
+    try {
+      return await scoped.canonicalPath(path);
+    } finally {
+      scoped.close();
+    }
+  }
+
   async #prepareSessionConfig(config: BridgeConfig): Promise<BridgeConfig> {
     if (config.connectionMode !== "vscode-remote") {
       return config;
@@ -1575,6 +1602,22 @@ export class BridgeController implements vscode.Disposable {
         },
       );
     }
+    if (this.#config.connectionMode === "vscode-remote") {
+      const home = this.#remoteIdentity.homeDirectory;
+      if (!home) {
+        throw new BridgeError(
+          "PROTOCOL_MISMATCH",
+          "Remote Executor did not report the remote user's home directory",
+        );
+      }
+      const roots = [
+        ...this.#config.roots.filter((root) => root.id !== REMOTE_HOME_ACCESS_ROOT_ID),
+        ...(home === this.#config.workspaceRoot ? [] : [remoteHomeAccessRoot(home)]),
+      ];
+      this.#config = parseBridgeConfig({ ...this.#config, roots });
+      await saveBridgeConfig(bridgeConfigPath(), this.#config);
+    }
+    await this.#saveWindowSession(this.#config);
     this.#shimRuntimeHealth = await this.#readShimRuntimeHealth(this.#config);
     const connectedState = this.#shimRuntimeHealth.appServerInitialized
       ? "ready"

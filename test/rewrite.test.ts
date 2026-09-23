@@ -39,6 +39,32 @@ const remoteCodegraphRoutes = createToolRouteInventory(config, {
 });
 
 describe("app-server request rewriting", () => {
+  it("advertises remote home access only when that root is configured", () => {
+    const message = { id: 1, method: "thread/start", params: {} };
+    const withoutHome = rewriteClientMessage(message, config, "/local/control") as {
+      params: { developerInstructions: string };
+    };
+    const withHome = rewriteClientMessage(
+      message,
+      parseBridgeConfig({
+        ...config,
+        roots: [
+          ...config.roots,
+          {
+            id: "remote-home-access", target: "remote", role: "secondary",
+            path: "/home/zkbot", displayName: "Remote user home",
+          },
+        ],
+      }),
+      "/local/control",
+    ) as { params: { developerInstructions: string } };
+
+    expect(withoutHome.params.developerInstructions).not.toContain("remote-home-access");
+    expect(withHome.params.developerInstructions).toContain(
+      'Select target="remote" and rootId="remote-home-access"',
+    );
+  });
+
   it("scopes the official local task list to the open workspace", () => {
     const message = {
       id: 0,

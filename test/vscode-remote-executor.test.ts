@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseBridgeConfig } from "../src/core/config.js";
+import { AuditLog } from "../src/core/audit-log.js";
 import { VsCodeRemoteExecutor } from "../src/core/vscode-remote-executor.js";
 import type { TransportRequest } from "../src/core/vscode-transport.js";
+import { DynamicToolRouter } from "../src/shim/dynamic-tools.js";
 
 let server: Server | null = null;
 let endpoint: string | null = null;
@@ -72,6 +74,146 @@ function config(pipe: string) {
 }
 
 describe("VsCodeRemoteExecutor", () => {
+  it("routes a home-root workspace tool without replacing the open workspace identity", async () => {
+    const observed: TransportRequest[] = [];
+    const pipe = await listen((request, write) => {
+      observed.push(request);
+      write({
+        id: request.id,
+        result: request.operation === "canonicalPath" ? "/home/user/other" : [],
+        type: "response",
+      });
+    });
+    const directory = await mkdtemp(join(tmpdir(), "codex-home-root-test-"));
+    const bridgeConfig = parseBridgeConfig({
+      ...config(pipe),
+      roots: [
+        {
+          id: "remote-primary", target: "remote", role: "primary",
+          path: "/workspace", displayName: "workspace",
+        },
+        {
+          id: "remote-home-access", target: "remote", role: "secondary",
+          path: "/home/user", displayName: "Remote user home",
+        },
+      ],
+    });
+    const executor = new VsCodeRemoteExecutor(bridgeConfig);
+    const router = new DynamicToolRouter(
+      bridgeConfig,
+      executor,
+      new AuditLog(join(directory, "audit.jsonl")),
+    );
+    try {
+      const response = await router.handle(1, {
+        arguments: { path: "other", target: "remote", rootId: "remote-home-access" },
+        callId: "home-list",
+        tool: "workspace_list_directory",
+      });
+      expect(response).toMatchObject({ success: true });
+      expect(observed).toHaveLength(2);
+      expect(observed).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          operation: "canonicalPath",
+          params: { path: "other", scopeRoot: "/home/user" },
+          workspaceRoot: "/workspace",
+        }),
+        expect.objectContaining({
+          operation: "listDirectory",
+          params: { path: "other", scopeRoot: "/home/user" },
+          workspaceRoot: "/workspace",
+        }),
+      ]));
+    } finally {
+      router.dispose();
+      executor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("runs an explicit home-root command with a home-relative working directory", async () => {
+    let observed: TransportRequest | undefined;
+    const pipe = await listen((request, write) => {
+      observed = request;
+      write({
+        id: request.id,
+        result: {
+          actualCwd: "/home/user/other",
+          durationMs: 2,
+          exitCode: 0,
+          signal: null,
+          stderr: "",
+          stdout: "/home/user/other",
+          truncated: false,
+        },
+        type: "response",
+      });
+    });
+    const directory = await mkdtemp(join(tmpdir(), "codex-home-exec-test-"));
+    const bridgeConfig = parseBridgeConfig({
+      ...config(pipe),
+      roots: [
+        { id: "remote-primary", target: "remote", role: "primary", path: "/workspace", displayName: "workspace" },
+        { id: "remote-home-access", target: "remote", role: "secondary", path: "/home/user", displayName: "Remote user home" },
+      ],
+    });
+    const executor = new VsCodeRemoteExecutor(bridgeConfig);
+    const router = new DynamicToolRouter(bridgeConfig, executor, new AuditLog(join(directory, "audit.jsonl")));
+    try {
+      const response = await router.handle(2, {
+        arguments: {
+          argv: ["pwd"], cwd: "other", rootId: "remote-home-access", target: "remote",
+        },
+        callId: "home-pwd",
+        tool: "remote_exec",
+      });
+      expect(response).toMatchObject({ success: true });
+      expect(observed).toMatchObject({
+        operation: "execute",
+        params: {
+          argv: ["pwd"],
+          scopeRoot: "/home/user",
+          options: { cwd: "other" },
+        },
+        workspaceRoot: "/workspace",
+      });
+    } finally {
+      router.dispose();
+      executor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the open workspace identity while scoping file operations to remote home", async () => {
+    let observed: TransportRequest | undefined;
+    const pipe = await listen((request, write) => {
+      observed = request;
+      write({ id: request.id, result: "/home/user/other/file.txt", type: "response" });
+    });
+    const scoped = parseBridgeConfig({
+      ...config(pipe),
+      roots: [{
+        id: "remote-primary",
+        target: "remote",
+        role: "primary",
+        path: "/home/user",
+        displayName: "user",
+      }],
+      workspaceRoot: "/home/user",
+    });
+    const executor = new VsCodeRemoteExecutor(scoped, "/workspace");
+
+    await expect(executor.canonicalPath("other/file.txt")).resolves.toBe(
+      "/home/user/other/file.txt",
+    );
+    expect(observed).toMatchObject({
+      operation: "canonicalPath",
+      params: { path: "other/file.txt", scopeRoot: "/home/user" },
+      workspaceRoot: "/workspace",
+    });
+    executor.close();
+  });
+
   it("streams output and returns structured results over the local transport", async () => {
     let observed: TransportRequest | undefined;
     const pipe = await listen((request, write) => {

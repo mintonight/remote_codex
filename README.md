@@ -6,7 +6,7 @@ Codex Remote Bridge 让官方 Codex VS Code 扩展及其内置 app-server 保持
 同时把经过授权的项目操作路由到当前 VS Code Remote SSH 工作区。默认链路复用 VS Code
 已经建立的远程连接，不读取 SSH 密码或私钥，也不会在远端启动 Codex。
 
-> 当前源码版本为 `0.3.88` 候选。已取消 Bridge 自定义的资源管理器右键添加入口和远端
+> 当前源码版本为 `0.3.89` 候选。已取消 Bridge 自定义的资源管理器右键添加入口和远端
 > 快照附件；官方输入区的原生 `@` 文件搜索通过当前 VS Code Remote SSH 工作区查询，
 > 不访问本机控制目录。可选兼容层不要求用户按住 `Shift`：VS Code Explorer 拖放转换为
 > 当前光标处的原生 `@` 引用；无论来自 VS Code Explorer 还是系统文件管理器，文件和
@@ -371,6 +371,25 @@ Remote SSH 实机验证。完整门禁和量化指标见
 关闭的待办保存在不可覆盖的归档与验收文档中。
 
 ## TODO
+
+- `0.3.89` 远端用户目录访问与同主机跨工作区拖放候选：远端 Executor 探测规范用户目录，
+  `remote-home-access` 通过当前 VS Code Remote SSH transport 提供用户目录内的
+  `workspace_*` 和显式 `remote_exec`；另一个工作区的拖入资源必须携带同一 SSH authority
+  的 URI，不能把仅有路径、不同主机或用户目录外路径误认为本机文件或当前远端资源。
+  自动化与 Linux x64 配套 VSIX 已通过；用户确认已完成双向文件/目录拖入与任务读取。
+  日志独立确认 `x2_deploy` 接收另一远端工作区目录、远端文件拖入、官方任务进入 Shim，
+  以及 `remote-home-access` 的目录遍历和文件读取。反向接收、home 根显式命令和
+  失败路径尚缺独立日志证据；退出条件是补齐这些实机记录、复核重连期间短暂
+  `ENOPRO` 和连接未建立是否仅为过渡状态，并完成 Windows x64 原生构建、配套 VSIX
+  汇总及独立实机补测。当前仅推送 Linux 源码候选，不声明完整发布门禁通过。见
+  `docs/acceptance/2026-09-22-release-0.3.89-remote-home-cross-workspace.md`。
+
+- 2026-09-22 Remote SSH 拖放再次异常：当前两端补丁、原件备份及当前生成器结果
+  哈希一致，但出问题窗口最后激活早于 Webview 补丁写入，尚无该窗口后续拖放捕获
+  记录。退出条件为用户在对应远程窗口手动重载后完成文件/目录拖放、唯一原生 `@`、
+  实际远程读取及再次重载回归；若仍失败，定位捕获/握手/插入阶段，不能以静态补丁
+  或本地窗口成功替代远程验收。现场见
+  `docs/acceptance/2026-09-22-remote-drop-recheck.md`。
 
 - 桌面已保存的 `bitahub` 连接主机身份核验：2026-09-22 桌面本地启动恢复后，官方
   自动连接日志仍报告 `Host key verification failed`。退出条件为用户通过可信渠道

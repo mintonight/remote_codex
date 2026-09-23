@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import * as vscode from "vscode";
 import { defaultRemotePrimaryRoot, parseBridgeConfig } from "../core/config.js";
 import { asBridgeError, BridgeError } from "../core/errors.js";
@@ -22,7 +24,7 @@ import {
   type RemoteExecutorCommandResponse,
 } from "../core/vscode-transport.js";
 import { DeferredExecutionEvents } from "./deferred-execution-events.js";
-import { matchesRemoteWorkspaceRoot } from "./workspace.js";
+import { matchesRemoteWorkspaceRoot, remoteExecutionRoot } from "./workspace.js";
 import {
   BACKGROUND_TASK_MAX_LOG_READ_BYTES,
   RemoteBackgroundTasks,
@@ -165,7 +167,12 @@ function validateWorkspace(request: RemoteExecutorCommandRequest): void {
 
 function executorFor(request: RemoteExecutorCommandRequest): LocalProcessExecutor {
   validateWorkspace(request);
-  const key = workspaceKey(request);
+  const executionRoot = remoteExecutionRoot(
+    request.workspaceRoot,
+    request.params.scopeRoot,
+    realpathSync(homedir()),
+  );
+  const key = `${workspaceKey(request)}\0${executionRoot}`;
   const existing = executors.get(key);
   if (existing) {
     return existing;
@@ -173,8 +180,8 @@ function executorFor(request: RemoteExecutorCommandRequest): LocalProcessExecuto
   const config: BridgeConfig = parseBridgeConfig({
     version: 2,
     host: request.hostId,
-    workspaceRoot: request.workspaceRoot,
-    roots: [defaultRemotePrimaryRoot(request.workspaceRoot)],
+    workspaceRoot: executionRoot,
+    roots: [defaultRemotePrimaryRoot(executionRoot)],
     connectionMode: "vscode-remote",
     localExecution: "deny",
     remoteHelper: "vscode-extension",
@@ -392,9 +399,12 @@ async function executeRequest(
     if (request.operation === "workspaceStop") {
       validateWorkspace(request);
       const key = workspaceKey(request);
-      const executor = executors.get(key);
-      executors.delete(key);
-      executor?.close();
+      for (const [executorKey, executor] of executors) {
+        if (executorKey.startsWith(`${key}\0`)) {
+          executors.delete(executorKey);
+          executor.close();
+        }
+      }
       const [operations, backgroundTasksStopped, stdioSessionsStopped] =
         await Promise.all([
           operationLedger.clearPrefix(`${key}\0`),

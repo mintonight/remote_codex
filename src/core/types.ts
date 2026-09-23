@@ -89,6 +89,7 @@ export interface RemoteIdentity {
   hostname: string;
   machineId: string;
   workspaceRoot: string;
+  homeDirectory?: string;
 }
 
 export interface ToolRequestContext {

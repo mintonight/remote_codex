@@ -1,3 +1,4 @@
+import { REMOTE_HOME_ACCESS_ROOT_ID } from "../core/config.js";
 import type {
   BridgeConfig,
   ConversationResourceConfig,
@@ -25,7 +26,7 @@ const REMOTE_INSTRUCTIONS = `Codex Remote Bridge execution policy:
 - The local host is available with the maximum filesystem and process permissions of the local VS Code user. The configured local-full-access secondary root spans that user's filesystem root and does not require per-path authorization.
 - For local paths or commands, built-in local filesystem and shell capabilities are allowed. Always use absolute local paths and keep them distinct from remote POSIX project paths.
 - To copy files from the remote project to the local host, use the available remote and local capabilities, preserve relative paths, and verify file counts and hashes. Do not misrepresent a structured copy as rsync.
-- Files and directories dropped into a Remote SSH conversation are read-only resources scoped to that thread, not project roots. Access one only through workspace_* with target="local" and its conversation resource id; never pass it to remote_exec or interpret it relative to the remote primary root.
+- Local files and directories dropped into a Remote SSH conversation are read-only resources scoped to that thread, not project roots. Access one only through workspace_* with target="local" and its conversation resource id; never pass it to remote_exec or interpret it relative to the remote primary root.
 - An exact-file conversation resource permits only that file. A directory conversation resource permits that directory subtree. Do not use mutation or Git tools on conversation resources.
 - For project overviews, prefer one workspace_list_tree call before focused directory listings.
 - At the start of every turn, remember that remote_exec is the project command runner.
@@ -104,8 +105,17 @@ function remotePolicy(
             `- Resource id: ${resource.id}; target: local; scope: conversation; kind: ${resource.kind}; path: ${resource.path}`,
         )),
   ].join("\n");
+  const remoteHome = config.roots.find(
+    (root) => root.id === REMOTE_HOME_ACCESS_ROOT_ID && root.target === "remote",
+  );
   return [
     REMOTE_INSTRUCTIONS,
+    ...(remoteHome
+      ? [
+          `- The remote-home-access root permits workspace_* reads and writes under ${remoteHome.path}. Select target="remote" and rootId="remote-home-access" for remote paths outside the open project; the primary root remains the default.`,
+          "- A dropped file from another Remote SSH workspace on the same host remains remote. Use remote-home-access for a path under the remote user's home; never reinterpret it as a local file.",
+        ]
+      : []),
     formatToolRouteInventory(toolRoutes),
     codegraphPolicy(toolRoutes),
     roots,

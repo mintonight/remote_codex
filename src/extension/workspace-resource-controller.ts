@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import * as vscode from "vscode";
+import { REMOTE_HOME_ACCESS_ROOT_ID } from "../core/config.js";
 import { BridgeError } from "../core/errors.js";
 import type { BridgeConfig, WorkspaceToolRoot } from "../core/types.js";
 import type {
@@ -185,6 +186,7 @@ export class WorkspaceResourceController
     threadId: string,
     rootId: string,
   ) => WorkspaceToolRoot | undefined;
+  readonly #canonicalRemoteHomePath: ((path: string) => Promise<string>) | undefined;
   readonly #resources = new Map<string, ResolvedResource>();
   readonly #snapshots = new Map<string, Snapshot>();
   #pendingEditorContext: RemoteEditorContext | null = null;
@@ -196,9 +198,11 @@ export class WorkspaceResourceController
       threadId: string,
       rootId: string,
     ) => WorkspaceToolRoot | undefined,
+    canonicalRemoteHomePath?: (path: string) => Promise<string>,
   ) {
     this.#config = config;
     this.#resolveAuthorizedRoot = resolveAuthorizedRoot;
+    this.#canonicalRemoteHomePath = canonicalRemoteHomePath;
   }
 
   register(): vscode.Disposable {
@@ -263,6 +267,9 @@ export class WorkspaceResourceController
         ? request.params.threadId
         : undefined;
     const resolved = this.#resolve(rootId, path, undefined, threadId);
+    if (resolved.root.target === "remote" && resolved.root.role === "secondary") {
+      await this.#assertStillAuthorized(resolved);
+    }
     if (request.operation === "registerWorkspaceResource") {
       this.#rememberResource(resolved);
       return this.#result("registered", resolved);
@@ -711,7 +718,10 @@ export class WorkspaceResourceController
 
     let actualUri: vscode.Uri;
     if (root.target === "remote") {
-      if (root.role !== "primary" || root.path !== config.workspaceRoot) {
+      if (
+        (root.role === "primary" && root.path !== config.workspaceRoot) ||
+        (root.role === "secondary" && root.id !== REMOTE_HOME_ACCESS_ROOT_ID)
+      ) {
         throw new BridgeError("INVALID_CONFIG", "Remote workspace resource root is invalid");
       }
       const remote = detectRemoteWorkspace();
@@ -724,7 +734,10 @@ export class WorkspaceResourceController
           "Workspace resource does not match the open Remote SSH workspace",
         );
       }
-      actualUri = vscode.Uri.joinPath(remote.workspaceUri, ...relativePath.split("/"));
+      actualUri = vscode.Uri.joinPath(
+        remote.workspaceUri.with({ path: root.path }),
+        ...relativePath.split("/"),
+      );
     } else {
       const authorized = this.#resolveAuthorizedRoot(threadId ?? "", root.id);
       const secondaryAuthorized =
@@ -772,7 +785,7 @@ export class WorkspaceResourceController
         (root) =>
           root.id === resolved.root.id &&
           root.target === "remote" &&
-          root.role === "primary" &&
+          root.role === resolved.root.role &&
           root.path === resolved.root.path,
       );
       const remote = detectRemoteWorkspace();
@@ -785,6 +798,18 @@ export class WorkspaceResourceController
           "COMMAND_DENIED",
           "Workspace resource no longer matches the active Remote SSH workspace",
         );
+      }
+      if (resolved.root.role === "secondary") {
+        if (!this.#canonicalRemoteHomePath) {
+          throw new BridgeError("COMMAND_DENIED", "Remote home validation is unavailable");
+        }
+        const canonicalPath = await this.#canonicalRemoteHomePath(resolved.actualUri.path);
+        if (canonicalPath !== resolved.actualUri.path) {
+          throw new BridgeError(
+            "PATH_OUTSIDE_ROOT",
+            "Remote home resource no longer matches its canonical path",
+          );
+        }
       }
       return;
     }

@@ -1760,6 +1760,7 @@ export class ShimProxy {
   closeSession(): void {
     this.#cancelApprovals();
     this.#remoteFuzzySearchSessions.clear();
+    this.#router?.dispose();
     this.#executor?.close();
   }
 }
