@@ -6,7 +6,7 @@ Codex Remote Bridge 让官方 Codex VS Code 扩展及其内置 app-server 保持
 同时把经过授权的项目操作路由到当前 VS Code Remote SSH 工作区。默认链路复用 VS Code
 已经建立的远程连接，不读取 SSH 密码或私钥，也不会在远端启动 Codex。
 
-> 当前源码版本为 `0.3.89` 候选。已取消 Bridge 自定义的资源管理器右键添加入口和远端
+> 当前源码版本为 `0.3.90` 候选。已取消 Bridge 自定义的资源管理器右键添加入口和远端
 > 快照附件；官方输入区的原生 `@` 文件搜索通过当前 VS Code Remote SSH 工作区查询，
 > 不访问本机控制目录。可选兼容层不要求用户按住 `Shift`：VS Code Explorer 拖放转换为
 > 当前光标处的原生 `@` 引用；无论来自 VS Code Explorer 还是系统文件管理器，文件和
@@ -371,6 +371,12 @@ Remote SSH 实机验证。完整门禁和量化指标见
 关闭的待办保存在不可覆盖的归档与验收文档中。
 
 ## TODO
+
+- `0.3.90` 自动编辑器上下文越界修复已在 Linux Remote SSH 实机完成首条消息和
+  远端项目操作验证；当前项目内的自动上下文也已成功附加。剩余退出条件是实机
+  显式越界拒绝、完整发布指标与 Windows x64 原生构建和运行验证；完整发布门禁
+  不得沿用上一版。见
+  `docs/acceptance/2026-09-23-release-0.3.90-editor-context-outside-root.md`。
 
 - `0.3.89` 远端用户目录访问与同主机跨工作区拖放候选：远端 Executor 探测规范用户目录，
   `remote-home-access` 通过当前 VS Code Remote SSH transport 提供用户目录内的

@@ -352,6 +352,11 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M01 候选安装与官方任务
 
+- `0.3.90` 活动编辑器越界回归：Linux `igh_test` Remote SSH 窗口已重载，
+  04:44 UTC 新任务首条消息和远端项目操作通过；当前项目内自动上下文 04:54 UTC
+  已成功附加。仍需实机显式越界拒绝、完整发布指标及 Windows x64 原生验证。详见
+  acceptance/2026-09-23-release-0.3.90-editor-context-outside-root.md。
+
 - 安装最终 Linux x64 Controller VSIX，确认 Remote Executor 自动升级到候选要求版本。
 - 已完成（2026-08-27，用户实机确认 + 日志/审计复核）：`0.3.78` 安装后在
   `data:/home/zkbot` 首次激活，于 `23:47:08.919` 记录

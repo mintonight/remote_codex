@@ -681,6 +681,34 @@ describe("WorkspaceResourceController", () => {
     ).resolves.toBeNull();
   });
 
+  it("skips an active editor in another remote project without blocking a turn", async () => {
+    mock.activeTextEditor = {
+      document: {
+        getText: () => "OTHER_REMOTE_PROJECT",
+        languageId: "plaintext",
+        uri: vscode.Uri.parse(
+          "vscode-remote://ssh-remote%2Btest_40/home/zkbot/work/other/context.txt",
+        ),
+      },
+      selection: {
+        end: { character: 0, line: 0 },
+        isEmpty: true,
+        start: { character: 0, line: 0 },
+      },
+    } as unknown as vscodeTypes.TextEditor;
+    const controller = new WorkspaceResourceController(
+      () => config([remoteRoot, remoteHomeRoot]),
+      () => undefined,
+    );
+
+    await expect(controller.captureEditorContext("file")).rejects.toMatchObject({
+      code: "PATH_OUTSIDE_ROOT",
+    });
+    await expect(
+      controller.execute(request("resolveEditorContext", remoteRoot.id, {})),
+    ).resolves.toBeNull();
+  });
+
   it("fails closed when the active Remote SSH identity no longer matches", async () => {
     mock.activeTextEditor = {
       document: {

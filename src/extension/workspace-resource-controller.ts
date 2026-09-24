@@ -406,7 +406,9 @@ export class WorkspaceResourceController
     } catch (error) {
       if (
         error instanceof BridgeError &&
-        (error.code === "COMMAND_DENIED" || error.code === "OUTPUT_TRUNCATED")
+        (error.code === "COMMAND_DENIED" ||
+          error.code === "OUTPUT_TRUNCATED" ||
+          error.code === "PATH_OUTSIDE_ROOT")
       ) {
         return null;
       }
