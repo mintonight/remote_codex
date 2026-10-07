@@ -63,7 +63,13 @@ describe.skipIf(process.platform !== "linux")("independent local service", () =>
     const descriptors = async () => {
       const dir = join(root, "external-cli");
       const names = (await readdir(dir)).filter((n) => /^\d+\.json$/.test(n));
-      return await Promise.all(names.map(async (n) => JSON.parse(await readFile(join(dir, n), "utf8"))));
+      // A stopping service unlinks its descriptor, which can race the readdir
+      // above. A record that vanished before the read is absent, not an error.
+      const records = await Promise.all(names.map(async (n) => {
+        try { return JSON.parse(await readFile(join(dir, n), "utf8")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+      }));
+      return records.filter((record) => record !== null);
     };
     try {
       const a = launch("client-a");
