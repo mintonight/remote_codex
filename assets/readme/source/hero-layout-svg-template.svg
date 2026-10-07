@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="380" viewBox="0 0 1200 380"
+     role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Codex Remote Bridge</title>
+  <desc id="hero-desc">官方 Codex 保持在本机运行，授权的项目操作经 VS Code Remote SSH 已认证通道路由到远端工作区。右侧为本机到远端的五级链路：官方 Codex UI 与本地 CLI、本地 Shim 与 Controller、VS Code Remote SSH 通道、Remote Workspace Executor、远程工作区。</desc>
+
+  <defs>
+    <linearGradient id="channelFill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#E8F1FB"/>
+      <stop offset="1" stop-color="#E3F5F1"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="380" rx="24" fill="#FFFFFF" stroke="#E3E8EF"/>
+
+  <!-- 本机 / 远端 分界线（仅覆盖右侧链路区） -->
+  <line x1="775" y1="157" x2="1160" y2="157"
+        stroke="#D4DCE5" stroke-width="1.5" stroke-dasharray="6 6"/>
+  <text x="768" y="150" text-anchor="end"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="18" fill="#8A96A8">本机</text>
+  <text x="768" y="188" text-anchor="end"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="18" fill="#8A96A8">远端</text>
+
+  <!-- 标题区 -->
+  <g id="title-block">
+    <text x="64" y="112" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="15" letter-spacing="4" fill="#8A96A8">VS CODE REMOTE SSH BRIDGE</text>
+    <text x="64" y="174" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+          font-size="52" font-weight="700" fill="#182230">Codex Remote Bridge</text>
+    <text x="64" y="220" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+          font-size="21" fill="#4E5B6E">官方 Codex 与内置 app-server 保持在本机运行</text>
+    <text x="64" y="250" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+          font-size="21" fill="#4E5B6E">项目操作经已认证 SSH 通道路由到远端工作区</text>
+
+    <g id="claim-chips" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
+       font-size="18" fill="#5A6B7E">
+      <rect x="64" y="292" width="222" height="36" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="175" y="316" text-anchor="middle">复用已认证 SSH 通道</text>
+      <rect x="300" y="292" width="200" height="36" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="400" y="316" text-anchor="middle">不在远端启动 Codex</text>
+      <rect x="514" y="292" width="176" height="36" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="602" y="316" text-anchor="middle">不读取密码与私钥</text>
+    </g>
+  </g>
+
+  <!-- 链路图 -->
+  <g id="routing-chain"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20">
+    <rect x="790" y="38" width="346" height="46" rx="10" fill="#FFFFFF" stroke="#C9D4E2" stroke-width="2"/>
+    <rect x="1080" y="42" width="38" height="38" rx="9" fill="#16233D"/>
+    <image x="1084" y="46" width="30" height="30" href="%%ICON_LOCAL%%" preserveAspectRatio="xMidYMid meet"/>
+    <text x="814" y="67" font-size="19" fill="#2A3646">官方 Codex UI / CLI</text>
+
+    <path d="M957 88 v10" stroke="#4C8DDA" stroke-width="2" fill="none"/>
+    <path d="M951 94 l6 7 6 -7" stroke="#4C8DDA" stroke-width="2" fill="none"/>
+
+    <rect x="790" y="102" width="346" height="46" rx="10" fill="#FFFFFF" stroke="#C9D4E2" stroke-width="2"/>
+    <text x="814" y="131" fill="#2A3646">本地 Shim 与 Controller</text>
+
+    <path d="M957 152 v10" stroke="#4C8DDA" stroke-width="2" fill="none"/>
+    <path d="M951 158 l6 7 6 -7" stroke="#4C8DDA" stroke-width="2" fill="none"/>
+
+    <rect x="790" y="166" width="346" height="46" rx="10" fill="url(#channelFill)" stroke="#4C8DDA" stroke-width="2"/>
+    <rect x="1080" y="170" width="38" height="38" rx="9" fill="#16233D"/>
+    <image x="1084" y="174" width="30" height="30" href="%%ICON_LOCK%%" preserveAspectRatio="xMidYMid meet"/>
+    <text x="814" y="195" fill="#1E5FA8">VS Code Remote SSH 通道</text>
+
+    <path d="M957 216 v10" stroke="#3FB9A6" stroke-width="2" fill="none"/>
+    <path d="M951 222 l6 7 6 -7" stroke="#3FB9A6" stroke-width="2" fill="none"/>
+
+    <rect x="790" y="230" width="346" height="46" rx="10" fill="#E9F7F4" stroke="#3FB9A6" stroke-width="2"/>
+    <text x="814" y="259" fill="#17685C">Remote Workspace Executor</text>
+
+    <path d="M957 280 v10" stroke="#3FB9A6" stroke-width="2" fill="none"/>
+    <path d="M951 286 l6 7 6 -7" stroke="#3FB9A6" stroke-width="2" fill="none"/>
+
+    <rect x="790" y="294" width="346" height="46" rx="10" fill="#E9F7F4" stroke="#3FB9A6" stroke-width="2"/>
+    <rect x="1080" y="298" width="38" height="38" rx="9" fill="#16233D"/>
+    <image x="1084" y="302" width="30" height="30" href="%%ICON_REMOTE%%" preserveAspectRatio="xMidYMid meet"/>
+    <text x="814" y="323" fill="#17685C">远程工作区</text>
+  </g>
+</svg>
