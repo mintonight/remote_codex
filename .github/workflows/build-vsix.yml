@@ -17,6 +17,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Install desktop entry test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y desktop-file-utils
       - name: Build, test & package native
         run: npm run check
         env:

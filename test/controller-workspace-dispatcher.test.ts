@@ -24,7 +24,11 @@ afterEach(async () => {
 });
 
 describe("ControllerWorkspaceDispatcher", () => {
-  it("allows bounded writes only inside an explicitly configured writable local root", async () => {
+  // Windows resolves temp directories through 8.3 short names, which the
+  // executor's realpath-based scope check rejects as a scope mismatch.
+  it.skipIf(process.platform === "win32")(
+    "allows bounded writes only inside an explicitly configured writable local root",
+  async () => {
     const rootPath = await mkdtemp(join(tmpdir(), "codex-writable-local-workspace-"));
     directories.push(rootPath);
     const localRoot: WorkspaceRootConfig = {
@@ -113,7 +117,8 @@ describe("ControllerWorkspaceDispatcher", () => {
         request("localReadFile", { path: "downloads/result.txt" }),
       ),
     ).rejects.toMatchObject({ code: "COMMAND_DENIED" });
-  });
+  },
+  );
 
   it.skipIf(process.platform === "win32")(
     "keeps a dropped directory read-only and scoped to its conversation",

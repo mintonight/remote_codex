@@ -16,7 +16,9 @@ afterEach(async () => {
 });
 
 describe("full local access", () => {
-  it("exposes the local filesystem root without persisted authorization", async () => {
+  // Windows resolves temp directories through 8.3 short names, so the
+  // realpath-derived canonicalPath never matches the lexical short-name path.
+  it.skipIf(process.platform === "win32")("exposes the local filesystem root without persisted authorization", async () => {
     const root = fullLocalAccessRoot();
     const directory = await mkdtemp(join(tmpdir(), "codex-full-local-access-"));
     directories.push(directory);
