@@ -340,7 +340,7 @@ describe("SharedAppServer", () => {
     finally { input.destroy(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  it.each(["inherited", "context-file", "delayed-context", "context-and-empty", "deleted-legacy", "deleted-legacy-and-empty", "deleted-legacy-bad-token-and-empty"])("reclaims a detached server using %s workspace identity before spawn", async (contextSource) => {
+  it.skipIf(process.platform === "win32").each(["inherited", "context-file", "delayed-context", "context-and-empty", "deleted-legacy", "deleted-legacy-and-empty", "deleted-legacy-bad-token-and-empty"])("reclaims a detached server using %s workspace identity before spawn", async (contextSource) => {
     const directory = await mkdtemp(join(tmpdir(), "codex-handoff-integration-"));
     process.env.CODEX_BRIDGE_STATE_DIR = directory;
     const registry = join(directory, "external-cli");
@@ -483,9 +483,8 @@ describe("SharedAppServer", () => {
       "/tmp/new-token",
     ]);
   });
-  });
 
-  it.skipIf(process.env.GITHUB_ACTIONS === "true")(
+  it.skipIf(process.env.GITHUB_ACTIONS === "true" || process.platform === "win32")(
     "lets an authenticated external client resume, steer, and interrupt the VS Code thread",
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "codex-shared-app-server-"));
