@@ -55,6 +55,8 @@ export class VsCodeConversationClient {
   >();
   readonly #pending = new Map<RpcId, PendingRequest>();
   #nextId = 1;
+  readonly #subscriptions = new Set<string>();
+  #closing = false;
 
   private constructor(
     descriptor: ExternalCliSessionDescriptor,
@@ -123,6 +125,7 @@ export class VsCodeConversationClient {
   ): Promise<VsCodeConversationClient> {
     const socket = new WebSocket(descriptor.endpoint, {
       headers: { Authorization: `Bearer ${token}` },
+      handshakeTimeout: initializeTimeoutMs,
     });
     await new Promise<void>((resolvePromise, reject) => {
       socket.once("open", resolvePromise);
@@ -183,11 +186,23 @@ export class VsCodeConversationClient {
   }
 
   close(): void {
-    this.#socket.close();
+    if (this.#closing) return;
+    // Unsubscribe on the same connection. This is not a request to delete history.
+    const unsubscribes = [...this.#subscriptions].map((threadId) =>
+      this.request("thread/unsubscribe", { threadId }, 250));
+    this.#closing = true;
+    this.#subscriptions.clear();
+    void Promise.allSettled(unsubscribes).finally(() => {
+      this.#rejectPending(new Error("VS Code Codex client disposed"));
+      this.#socket.close();
+      const timer = setTimeout(() => this.#socket.terminate(), 250);
+      timer.unref();
+      this.#socket.once("close", () => clearTimeout(timer));
+    });
   }
 
   get isOpen(): boolean {
-    return this.#socket.readyState === WebSocket.OPEN;
+    return !this.#closing && this.#socket.readyState === WebSocket.OPEN;
   }
 
   #handleMessage(data: RawData): void {
@@ -208,6 +223,12 @@ export class VsCodeConversationClient {
       if (message.error) {
         pending.reject(rpcError(message.error));
       } else {
+        if (["thread/start", "thread/resume", "thread/fork"].includes(pending.method)) {
+          const result = isRecord(message.result) ? message.result : {};
+          const thread = isRecord(result.thread) ? result.thread : {};
+          const threadId = typeof thread.id === "string" ? thread.id : pending.threadId;
+          if (threadId) this.#subscriptions.add(threadId);
+        }
         pending.resolve(
           pending.method === "thread/turns/list" && pending.threadId
             ? this.#restoreInterruptedTurnItems(message.result, pending.threadId)
@@ -317,7 +338,9 @@ async function persistentClient(
   const existing = persistentClients.get(descriptor.pid);
   if (
     existing?.isOpen &&
-    existing.descriptor.endpoint === descriptor.endpoint
+    existing.descriptor.endpoint === descriptor.endpoint &&
+    existing.descriptor.startedAtMs === descriptor.startedAtMs &&
+    existing.descriptor.appServer?.startedAtMs === descriptor.appServer?.startedAtMs
   ) {
     return existing;
   }
@@ -341,11 +364,44 @@ function sessionSummary(descriptor: ExternalCliSessionDescriptor): Record<string
     workspaceRoot: descriptor.workspaceRoot,
     activeThreadId: descriptor.threadId ?? null,
     startedAtMs: descriptor.startedAtMs,
+    lifecycle: descriptor.lifecycle ?? "ready",
   };
 }
 
+async function activeSessions(): Promise<ExternalCliSessionDescriptor[]> {
+  const sessions = await discoverExternalCliSessions();
+  for (const [pid, client] of persistentClients) {
+    if (!sessions.some((s) => s.pid === pid && s.startedAtMs === client.descriptor.startedAtMs &&
+      s.endpoint === client.descriptor.endpoint && s.appServer?.startedAtMs === client.descriptor.appServer?.startedAtMs)) {
+      client.close();
+      persistentClients.delete(pid);
+    }
+  }
+  return sessions;
+}
+
+export async function loadedThreadIds(client: Pick<VsCodeConversationClient, "request">): Promise<string[]> {
+  const ids = new Set<string>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 100; page += 1) {
+    const result = await client.request("thread/loaded/list", { limit: 100, ...(cursor ? { cursor } : {}) });
+    if (!isRecord(result) || !Array.isArray(result.data) || result.data.some((id) => typeof id !== "string")) {
+      throw new Error("Invalid thread/loaded/list response; thread ownership is unknown");
+    }
+    for (const id of result.data as string[]) ids.add(id);
+    if (result.nextCursor == null) return [...ids];
+    if (typeof result.nextCursor !== "string" || !result.nextCursor || cursors.has(result.nextCursor)) {
+      throw new Error("Invalid thread/loaded/list pagination");
+    }
+    cursor = result.nextCursor;
+    cursors.add(cursor);
+  }
+  throw new Error("Thread discovery exceeded the pagination limit");
+}
+
 async function sessionByPid(sessionPid: number): Promise<ExternalCliSessionDescriptor> {
-  const descriptor = (await discoverExternalCliSessions()).find(
+  const descriptor = (await activeSessions()).find(
     (candidate) => candidate.pid === sessionPid,
   );
   if (!descriptor) {
@@ -355,7 +411,7 @@ async function sessionByPid(sessionPid: number): Promise<ExternalCliSessionDescr
 }
 
 export async function listVsCodeConversations(limit = 20): Promise<unknown> {
-  const sessions = await discoverExternalCliSessions();
+  const sessions = await activeSessions();
   const results = await Promise.all(
     sessions.map(async (descriptor) => {
       try {
@@ -367,7 +423,8 @@ export async function listVsCodeConversations(limit = 20): Promise<unknown> {
             sourceKinds: ["vscode"],
           }),
         );
-        return { ...sessionSummary(descriptor), threads };
+        const loaded = await withClient(descriptor, loadedThreadIds);
+        return { ...sessionSummary(descriptor), threads, loadedThreadIds: loaded };
       } catch (error) {
         return {
           ...sessionSummary(descriptor),
@@ -425,13 +482,27 @@ async function findConversation(
   client: VsCodeConversationClient;
   descriptor: ExternalCliSessionDescriptor;
 }> {
-  const sessions = (await discoverExternalCliSessions()).filter(
+  const sessions = (await activeSessions()).filter(
     (descriptor) => sessionPid === undefined || descriptor.pid === sessionPid,
   );
+  if (sessionPid === undefined && sessions.length > 0) {
+    const owners: ExternalCliSessionDescriptor[] = [];
+    for (const descriptor of sessions) {
+      const client = await persistentClient(descriptor);
+      if ((await loadedThreadIds(client)).includes(threadId)) owners.push(descriptor);
+    }
+    if (owners.length > 1 || (owners.length === 0 && sessions.length > 1)) {
+      throw new Error("Thread ownership is ambiguous; specify sessionPid instead of selecting by history");
+    }
+    if (owners.length === 1) {
+      const descriptor = owners[0]!;
+      return { client: await persistentClient(descriptor), descriptor };
+    }
+  }
   let lastError: unknown;
   for (const descriptor of sessions) {
-    const client = await persistentClient(descriptor);
     try {
+      const client = await persistentClient(descriptor);
       await client.request("thread/read", { threadId, includeTurns: false });
       return { client, descriptor };
     } catch (error) {

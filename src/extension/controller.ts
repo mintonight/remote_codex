@@ -6,7 +6,12 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { AuditLog } from "../core/audit-log.js";
 import { saveOfficialCodexRuntime } from "../core/codex-runtime-store.js";
-import { defaultRemotePrimaryRoot, parseBridgeConfig } from "../core/config.js";
+import {
+  defaultRemotePrimaryRoot,
+  parseBridgeConfig,
+  REMOTE_HOME_ACCESS_ROOT_ID,
+  remoteHomeAccessRoot,
+} from "../core/config.js";
 import { loadBridgeConfig, saveBridgeConfig } from "../core/config-store.js";
 import { asBridgeError, BridgeError } from "../core/errors.js";
 import {
@@ -58,6 +63,10 @@ import {
   isRemoteExecutorPing,
 } from "../core/vscode-transport.js";
 import { planAutomaticInitialization } from "./automatic-initialization.js";
+import {
+  appServerSessionBootstrapFingerprint,
+  shouldReloadForAppServerSession,
+} from "./app-server-session-bootstrap.js";
 import { detectRemoteWorkspace } from "./remote-context.js";
 import {
   planRemoteExecutorInstall,
@@ -88,6 +97,8 @@ import {
 import { DropConsentState } from "./drop-consent-state.js";
 import { ControllerWorkspaceDispatcher } from "./controller-workspace-dispatcher.js";
 import { ConversationResourceAuthority } from "./conversation-resource-authority.js";
+import { fullLocalAccessRoot } from "./full-local-access-root.js";
+import { LocalWorkspaceExecutor } from "./local-workspace-executor.js";
 import {
   attachDroppedResourcesToCodex,
   parseWorkbenchDropPayload,
@@ -109,6 +120,7 @@ import {
   type WorkbenchDropCompatibilityResult,
 } from "./workbench-drop-compatibility.js";
 import { VsCodeTransportServer } from "./vscode-transport-server.js";
+import { cleanupStaleOfficialAppServers } from "./stale-app-server-cleanup.js";
 import {
   isWorkspaceResourceOperation,
   WorkspaceResourceController,
@@ -116,7 +128,9 @@ import {
 
 const execFileAsync = promisify(execFile);
 const WORKBENCH_DROP_ONBOARDING_KEY =
-  "codexRemoteBridge.workbenchDropOnboardingFingerprint.v2";
+  "codexRemoteBridge.workbenchDropOnboardingFingerprint.v3";
+const APP_SERVER_SESSION_BOOTSTRAP_KEY =
+  "codexRemoteBridge.appServerSessionBootstrapFingerprint.v1";
 
 interface DiagnosticReport {
   generatedAt: string;
@@ -163,6 +177,11 @@ interface DiagnosticReport {
     codexInlineMentionCompatibility: CodexInlineMentionCompatibilityResult | null;
     workbenchDropCompatibility: WorkbenchDropCompatibilityResult | null;
     automaticDropAuthorizationEnabled: boolean;
+    fullLocalAccess: {
+      root: BridgeConfig["roots"][number];
+      accessible: boolean;
+      error: string | null;
+    };
     conversationResources: {
       resourceCount: number;
       threadCount: number;
@@ -265,6 +284,8 @@ export class BridgeController implements vscode.Disposable {
   #initialization: Promise<void> | null = null;
   #dropOnboarding: Promise<void> | null = null;
   #shutdown: Promise<void> | null = null;
+  #sessionMaintenance: Promise<void> | null = null;
+  #sessionMaintenanceTimer: NodeJS.Timeout | undefined;
   #reloadRequested = false;
   #autoSuppressed = false;
   #remoteIdentity: RemoteIdentity | null = null;
@@ -296,11 +317,16 @@ export class BridgeController implements vscode.Disposable {
     this.#settings = new OfficialSettingsManager(context);
     const workspaceDispatcher = new ControllerWorkspaceDispatcher(
       () => this.#sessionConfig ?? this.#config,
-      (threadId, rootId) => this.#conversationResources.find(threadId, rootId),
+      (threadId, rootId) =>
+        this.#conversationResources.find(threadId, rootId) ??
+        (rootId === fullLocalAccessRoot().id ? fullLocalAccessRoot() : undefined),
     );
     this.#workspaceResources = new WorkspaceResourceController(
       () => this.#sessionConfig ?? this.#config,
-      (threadId, rootId) => this.#conversationResources.find(threadId, rootId),
+      (threadId, rootId) =>
+        this.#conversationResources.find(threadId, rootId) ??
+        (rootId === fullLocalAccessRoot().id ? fullLocalAccessRoot() : undefined),
+      (path) => this.#canonicalRemoteHomePath(path),
     );
     this.#transport = new VsCodeTransportServer(
       () => this.#sessionConfig ?? this.#config,
@@ -367,11 +393,14 @@ export class BridgeController implements vscode.Disposable {
       vscode.commands.registerCommand("codexRemoteBridge.acceptWorkbenchDrop", (payload) =>
         this.addWorkbenchCodexContext(payload),
       ),
+      vscode.commands.registerCommand("codexRemoteBridge.dropReady", () => !this.#shutdown),
       vscode.commands.registerCommand(REMOTE_OUTPUT_COMMAND, (event) =>
         this.#transport.handleOutput(event),
       ),
       this.#workspaceResources.register(),
     ];
+    this.#sessionMaintenanceTimer = setInterval(() => void this.#maintainSessions(), 60_000);
+    this.#sessionMaintenanceTimer?.unref();
   }
 
   async initialize(): Promise<void> {
@@ -400,11 +429,30 @@ export class BridgeController implements vscode.Disposable {
     }
   }
 
+  async #maintainSessions(): Promise<void> {
+    if (this.#shutdown) return;
+    if (this.#sessionMaintenance) return await this.#sessionMaintenance;
+    this.#sessionMaintenance = (async () => {
+      try {
+        const cleanup = await cleanupStaleOfficialAppServers();
+        if (cleanup.staleCount > 0) {
+          const outcome = cleanup.failedPids.length === 0 ? "succeeded" : "failed";
+          this.#log(`stale official Codex app-server cleanup ${outcome}: stale=${cleanup.staleCount}, terminated=${cleanup.terminatedPids.length}, removed=${cleanup.removedCount}, failed=${cleanup.failedPids.length}`);
+          await this.#audit.write({ operation: "app_server.stale_cleanup", outcome, details: { ...cleanup } });
+        }
+      } catch (error) { this.#log(`stale official Codex app-server cleanup skipped: ${String(error)}`); }
+    })();
+    try { await this.#sessionMaintenance; }
+    finally { this.#sessionMaintenance = null; }
+  }
+
   async #initializeOnce(): Promise<boolean> {
     if (this.#state.state === "configuring") {
       this.#log("automatic initialization deferred while configuration is in progress");
       return false;
     }
+
+    await this.#maintainSessions();
 
     const plan = planAutomaticInitialization({
       autoInitialize: vscode.workspace
@@ -526,6 +574,7 @@ export class BridgeController implements vscode.Disposable {
     try {
       const result = await attachDroppedResourcesToCodex(resources, {
         log: (message) => this.logCodexContextDrop(message),
+        remoteHomePath: this.#remoteIdentity?.homeDirectory,
       });
       if (result.attachedCount === 0) {
         throw new BridgeError(
@@ -580,6 +629,7 @@ export class BridgeController implements vscode.Disposable {
       const parsed = parseWorkbenchDropPayload(
         payload,
         (message) => this.logCodexContextDrop(message),
+        this.#remoteIdentity?.homeDirectory,
       );
       const localResourcesReady = await this.#prepareDroppedLocalResources(
         parsed.resources,
@@ -755,7 +805,7 @@ export class BridgeController implements vscode.Disposable {
       return;
     }
 
-    const patchableStatuses = new Set(["disabled", "already-restored", "already-patched"]);
+    const patchableStatuses = new Set(["disabled", "already-restored", "already-patched", "update-available"]);
     if (
       !patchableStatuses.has(workbench.status) ||
       !patchableStatuses.has(inlineMention.status)
@@ -766,12 +816,12 @@ export class BridgeController implements vscode.Disposable {
       return;
     }
 
-    await this.#context.globalState.update(WORKBENCH_DROP_ONBOARDING_KEY, fingerprint);
     if (
       workbench.status === "already-patched" &&
       inlineMention.status === "already-patched" &&
       this.#dropConsent.enabled()
     ) {
+      await this.#rememberWorkbenchDropOnboardingDecision();
       this.#log("native Codex drop onboarding: compatibility layer already enabled");
       return;
     }
@@ -791,10 +841,12 @@ export class BridgeController implements vscode.Disposable {
       { modal: true },
       "Enable",
     );
-    await this.#rememberWorkbenchDropOnboardingDecision();
     if (confirmation !== "Enable") {
+      await this.#rememberWorkbenchDropOnboardingDecision();
       return;
     }
+    // Failed installation must remain retryable; only a decline or success is remembered.
+    await this.#context.globalState.update(WORKBENCH_DROP_ONBOARDING_KEY, undefined);
     const automaticAuthorizationWasEnabled =
       this.#dropConsent.enabled();
     try {
@@ -887,25 +939,17 @@ export class BridgeController implements vscode.Disposable {
       return;
     }
 
+    await this.#rememberWorkbenchDropOnboardingDecision();
     if (!compatibilityChanged) {
       void vscode.window.showInformationMessage(
         "The native Codex drop surface is already enabled.",
       );
       return;
     }
-    this.#log("native Codex drop compatibility enabled; reloading the window automatically");
+    this.#log("native Codex drop compatibility enabled; manual window reload required");
     void vscode.window.showInformationMessage(
-      "Codex Bridge enabled cursor-positioned @ mention drops. Reloading VS Code automatically.",
+      "Codex Bridge enabled cursor-positioned @ mention drops. Reload VS Code manually to finish.",
     );
-    try {
-      await this.#reloadWindow();
-    } catch (error) {
-      const bridgeError = asBridgeError(error, "COMMAND_DENIED");
-      this.#log(`automatic reload after native Codex drop enable failed: ${bridgeError.message}`);
-      void vscode.window.showErrorMessage(
-        `Codex Bridge enabled native drops, but could not reload VS Code automatically: ${bridgeError.message}`,
-      );
-    }
   }
 
   async disableWorkbenchDrop(): Promise<void> {
@@ -1084,9 +1128,11 @@ export class BridgeController implements vscode.Disposable {
 
       this.#config = await this.#resolveCompatibleCodex(config);
       await saveBridgeConfig(bridgeConfigPath(), this.#config);
-      await this.#saveWindowSession(this.#config);
       this.#state.transition("connecting");
       await this.#connect();
+      if (await this.#reloadForMissingAppServerSession(this.#config)) {
+        return;
+      }
       if (interactive) {
         void vscode.window.showInformationMessage(
           this.#state.state === "ready"
@@ -1116,6 +1162,51 @@ export class BridgeController implements vscode.Disposable {
     }
   }
 
+  async #reloadForMissingAppServerSession(config: BridgeConfig): Promise<boolean> {
+    const fingerprint = appServerSessionBootstrapFingerprint({
+      bridgeVersion: this.#context.extension.packageJSON.version as string,
+      host: config.host,
+      vscodeVersion: vscode.version,
+      workspaceRoot: config.workspaceRoot,
+    });
+    const previous = this.#context.workspaceState.get<string>(
+      APP_SERVER_SESSION_BOOTSTRAP_KEY,
+    );
+    if (
+      !shouldReloadForAppServerSession(
+        this.#shimRuntimeHealth.shimStarted,
+        previous,
+        fingerprint,
+      )
+    ) {
+      if (!this.#shimRuntimeHealth.shimStarted && previous === fingerprint) {
+        this.#log(
+          "official Codex app-server is still detached after the one-time session bootstrap reload",
+        );
+      }
+      return false;
+    }
+    await this.#context.workspaceState.update(
+      APP_SERVER_SESSION_BOOTSTRAP_KEY,
+      fingerprint,
+    );
+    await this.#audit.write({
+      operation: "app_server.session_bootstrap_reload",
+      outcome: "succeeded",
+      hostId: config.host,
+      workspaceRoot: config.workspaceRoot,
+      details: {
+        appServerInitialized: this.#shimRuntimeHealth.appServerInitialized,
+        shimStarted: this.#shimRuntimeHealth.shimStarted,
+      },
+    });
+    this.#log(
+      "official Codex started before the remote window session was published; reloading once",
+    );
+    await this.#reloadWindow();
+    return true;
+  }
+
   async start(): Promise<void> {
     this.#autoSuppressed = false;
     if (!["disabled", "disconnected", "degraded", "incompatible"].includes(this.#state.state)) {
@@ -1128,14 +1219,16 @@ export class BridgeController implements vscode.Disposable {
     try {
       const storedConfig = await loadBridgeConfig(bridgeConfigPath());
       this.#config = await this.#resolveCompatibleCodex(
-        this.#primaryOnlyConfig({
+        this.#withFullLocalAccess({
           ...storedConfig,
           sshExecutable: resolveSshExecutable(storedConfig.sshExecutable),
         }),
       );
       await saveBridgeConfig(bridgeConfigPath(), this.#config);
-      await this.#saveWindowSession(this.#config);
       await this.#connect();
+      if (await this.#reloadForMissingAppServerSession(this.#config)) {
+        return;
+      }
       void vscode.window.showInformationMessage(
         this.#state.state === "ready"
           ? `Codex Bridge ready: official extension Codex -> ${this.#config.host}`
@@ -1360,6 +1453,8 @@ export class BridgeController implements vscode.Disposable {
   }
 
   async #shutdownOnce(): Promise<void> {
+    if (this.#sessionMaintenanceTimer) clearInterval(this.#sessionMaintenanceTimer);
+    await this.#sessionMaintenance;
     this.#stopShimRuntimeMonitor();
     this.#executor?.close();
     this.#executor = null;
@@ -1383,6 +1478,27 @@ export class BridgeController implements vscode.Disposable {
     }
     process.env.CODEX_BRIDGE_SESSION_CONFIG = this.#sessionConfigPath;
     await saveBridgeConfig(this.#sessionConfigPath, this.#sessionConfig);
+  }
+
+  async #canonicalRemoteHomePath(path: string): Promise<string> {
+    const config = this.#sessionConfig;
+    const home = config?.roots.find((root) => root.id === REMOTE_HOME_ACCESS_ROOT_ID);
+    if (!config || !home || config.connectionMode !== "vscode-remote") {
+      throw new BridgeError("REMOTE_TRANSPORT_DISCONNECTED", "Remote home scope is unavailable");
+    }
+    const scoped = new VsCodeRemoteExecutor(
+      parseBridgeConfig({
+        ...config,
+        roots: [defaultRemotePrimaryRoot(home.path)],
+        workspaceRoot: home.path,
+      }),
+      config.workspaceRoot,
+    );
+    try {
+      return await scoped.canonicalPath(path);
+    } finally {
+      scoped.close();
+    }
   }
 
   async #prepareSessionConfig(config: BridgeConfig): Promise<BridgeConfig> {
@@ -1415,9 +1531,12 @@ export class BridgeController implements vscode.Disposable {
       version: 2,
       host: remote.host,
       workspaceRoot: remote.workspaceRoot,
-      roots: [defaultRemotePrimaryRoot(remote.workspaceRoot)],
+      roots: [
+        defaultRemotePrimaryRoot(remote.workspaceRoot),
+        ...(connectionMode === "vscode-remote" ? [fullLocalAccessRoot()] : []),
+      ],
       connectionMode,
-      localExecution: "deny",
+      localExecution: "allow",
       remoteHelper: connectionMode === "vscode-remote" ? "vscode-extension" : "none",
       sshUser: settings.get<string | null>("sshUser"),
       sshPort: settings.get<number | null>("sshPort"),
@@ -1433,7 +1552,7 @@ export class BridgeController implements vscode.Disposable {
     });
   }
 
-  #primaryOnlyConfig(config: BridgeConfig): BridgeConfig {
+  #withFullLocalAccess(config: BridgeConfig): BridgeConfig {
     const primaryRoot = config.roots.find(
       (root) => root.target === "remote" && root.role === "primary",
     );
@@ -1443,7 +1562,13 @@ export class BridgeController implements vscode.Disposable {
     return parseBridgeConfig({
       ...config,
       workspaceRoot: primaryRoot.path,
-      roots: [primaryRoot],
+      roots: [
+        primaryRoot,
+        ...(config.connectionMode === "vscode-remote"
+          ? [fullLocalAccessRoot()]
+          : []),
+      ],
+      localExecution: "allow",
     });
   }
 
@@ -1477,6 +1602,22 @@ export class BridgeController implements vscode.Disposable {
         },
       );
     }
+    if (this.#config.connectionMode === "vscode-remote") {
+      const home = this.#remoteIdentity.homeDirectory;
+      if (!home) {
+        throw new BridgeError(
+          "PROTOCOL_MISMATCH",
+          "Remote Executor did not report the remote user's home directory",
+        );
+      }
+      const roots = [
+        ...this.#config.roots.filter((root) => root.id !== REMOTE_HOME_ACCESS_ROOT_ID),
+        ...(home === this.#config.workspaceRoot ? [] : [remoteHomeAccessRoot(home)]),
+      ];
+      this.#config = parseBridgeConfig({ ...this.#config, roots });
+      await saveBridgeConfig(bridgeConfigPath(), this.#config);
+    }
+    await this.#saveWindowSession(this.#config);
     this.#shimRuntimeHealth = await this.#readShimRuntimeHealth(this.#config);
     const connectedState = this.#shimRuntimeHealth.appServerInitialized
       ? "ready"
@@ -1873,6 +2014,7 @@ export class BridgeController implements vscode.Disposable {
         workbenchDropCompatibility,
         automaticDropAuthorizationEnabled:
           this.#dropConsent.enabled(),
+        fullLocalAccess: await this.#fullLocalAccessDiagnostics(config),
         conversationResources: this.#conversationResources.summary(),
       },
       remote: {
@@ -1882,6 +2024,42 @@ export class BridgeController implements vscode.Disposable {
       },
       effectiveConfig: config,
     };
+  }
+
+  async #fullLocalAccessDiagnostics(config: BridgeConfig | null): Promise<{
+    root: BridgeConfig["roots"][number];
+    accessible: boolean;
+    error: string | null;
+  }> {
+    const root = fullLocalAccessRoot();
+    const configured = config?.roots.find(
+      (candidate) =>
+        candidate.id === root.id &&
+        candidate.target === "local" &&
+        candidate.role === "secondary" &&
+        candidate.path === root.path,
+    );
+    if (!config || config.connectionMode !== "vscode-remote" || !configured) {
+      return { root, accessible: false, error: "Full local access root is unavailable" };
+    }
+    try {
+      const executor = new LocalWorkspaceExecutor(
+        root.id,
+        (rootId) => (rootId === root.id ? root : undefined),
+        {
+          commandTimeoutMs: config.commandTimeoutMs,
+          maxOutputBytes: config.maxOutputBytes,
+        },
+      );
+      await executor.canonicalPath(".");
+      return { root, accessible: true, error: null };
+    } catch (error) {
+      return {
+        root,
+        accessible: false,
+        error: asBridgeError(error, "COMMAND_DENIED").message,
+      };
+    }
   }
 
   #officialCodexInstallation(): {

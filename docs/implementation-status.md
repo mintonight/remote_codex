@@ -1,6 +1,154 @@
 # 实施状态
 
-更新日期：2026-08-05
+更新日期：2026-09-23
+
+## 0.3.90 Remote SSH 自动编辑器上下文越界回归
+
+Linux Remote SSH `igh_test` 窗口当前活动编辑器属于同一 SSH 主机的另一项目。
+`0.3.89` 的自动编辑器上下文在计算当前主根相对路径时返回 `PATH_OUTSIDE_ROOT`，
+Shim 将可选上下文失败升级为 `turn/start` 错误，导致任务创建后首条消息无法发送。
+`0.3.90` 仅在自动上下文解析中把该越界视作无可附加编辑器上下文；显式选择仍
+拒绝，工作区身份失配与传输断开仍失败关闭。Executor 实现和协议不变，仍为
+`0.2.22`。定向测试覆盖同 authority 的另一项目、显式拒绝和现有身份失配；
+Linux VSIX 安装后，用户重载的 `igh_test` 窗口在 2026-09-24 04:44 UTC 新建任务并
+成功发送首条消息；官方日志出现 turn-start，随后 Bridge 审计记录远端项目读取、
+搜索和命令执行。当前项目内自动上下文于 04:54 UTC 成功附加。实机显式越界负测、
+Windows 与完整发布指标仍待补测，详见对应 `docs/acceptance/` 记录。
+
+## 0.3.88 Linux 桌面共享后台身份恢复候选
+
+桌面重开时发现共享后台仍可响应，但旧 journal 的墙钟启动时间与当前系统读数相差
+2002 ms，超过 2000 ms 门禁，导致发现结果为空，等待已有服务锁 20 秒后初始化失败。
+新增仅用于 Linux 活跃本地服务接入的恢复通路：复用结构化描述符解析，验证两端进程
+可执行文件 inode、真实 native 配置域、内核 TCP 监听 socket 的进程归属，随后用既有
+凭据执行 initialize 和 bridge/service/status，并再次核验进程存活身份和 socket。
+不扩大时间容差，不修改 journal，不生成新凭据，不启动竞争 native，不改变进程终止
+或孤立后台接管门禁。恢复失败保持拒绝，不将普通本地服务或其他配置域纳入接管。
+仅 root Controller/Shim 升到 0.3.88，Executor 保持 0.2.21。自动化与当前后台只读恢复
+证据见 acceptance/2026-09-22-release-0.3.88-desktop-identity-recovery.md；实际桌面重开、
+VS Code/Remote SSH 和 Windows 验收尚未完成，不代表正式发布。
+用户随后确认桌面端可用，并反馈 VS Code 面板仍打不开。现场官方 Codex 日志记录
+同一初始化超时，已核对 VS Code 仍装 0.3.87；现将已验证的 0.3.88 Linux VSIX 安装
+到 VS Code，待用户手动重载后验收，不更换已运行的桌面或共享后台。
+安装证据见 acceptance/2026-09-22-vscode-0.3.88-install.md。
+
+## 0.3.87 候选源码归档
+
+用户在已说明实机门禁尚未闭环后，再次明确要求智能提交并推送。本轮按该最新请求
+保存候选源码和历史证据，不新建发布标签、不声明已验收，也不永久修改项目门禁。
+按会话恢复基础、共享执行与桌面接入、拖放握手、诊断文档拆分中文提交。各分组属于
+同一个 0.3.87 候选快照，不构建或发布中间提交对应的版本。
+另将桌面入口单测改用临时菜单文件，并为 Linux CI 显式补齐 desktop-file-utils，
+避免依赖作者机器安装的 ChatGPT。GitHub 实际执行结果仍单独验收。
+
+## 0.3.87 拖放双端握手候选
+
+针对 Workbench 升级后补丁消失、Webview 仍拦截原生事件的半启用状态，新增 nonce
+握手和短时有效确认：Workbench 同时探测 Bridge dropReady 命令，接收端未就绪或
+确认过期时两端都不 preventDefault。拖动过程中按需续期，不启动后台轮询或读取历史。
+受管补丁内容与当前生成器不同时报告 update-available，继续通过已验证原件升级。
+安装失败不再缓存为用户拒绝，明确拒绝仍不重复提示；安装后改为用户手动重载。
+实装 Webview 语法测试改为定位当前启用的官方扩展并校验原件哈希。人工退出条件和
+本次安装记录见 acceptance/2026-09-17-release-0.3.87-drop-handshake.md。
+
+## 0.3.86 默认桌面图标接管候选
+
+现场新桌面 PID 913183 已重启，但没有 CODEX_CLI_PATH/共享标记，并另起 native
+913683；VS Code 的回调审计则正常。上版只提供独立入口，不足以保证常用图标接入。
+现在用 desktop-file-edit 修改用户级同名 desktop entry，保留名称、图标、MIME 等
+原属性并关闭绕过 Exec 的 D-Bus 激活；系统资源不动，自定义用户入口有原件恢复。
+新增身份校验、仅 SIGTERM、无强杀升级的桌面重启助手，接入成功必须由新 desktop
+进程、其 Shim 子进程和新审计共同确认。用户已明确授权本轮修好后重启桌面端。
+
+## 0.3.85 统一回调入口候选
+
+新增按请求 ID 返回结果的回调队列，同线程 ACK 有序、追加和停止不等待普通队列。
+桌面与本地 VS Code 共用配置域发现与已加载线程路由，历史后台只接入、不强制迁移；
+无实例才建立用户级服务。底层单写入保护保留，没有伪造 turn 或取消客户端断开时的
+后台任务。跨项目桌面历史不再受单根过滤，VS Code 仍按当前根过滤列表。
+
+桌面启动参数的结构化 TOML 覆盖项在 thread start/resume/fork 中保留，包括桌面工具
+MCP。新增独立、哈希校验、可卸载的桌面启动入口，不改官方资源、不重启用户应用。
+官方二进制测试使用两个现有实例、两个项目和真实 shell turn：桌面断开后 VS Code
+仍可恢复 active 线程并停止；新增线程的 codex_app MCP 可被官方状态接口列举。
+这些是协议测试，不等同于桌面渲染/长期任务/模型队列/灰屏验收。
+
+## 0.3.84 Linux 本地独立服务候选
+
+Linux 本地单根工作区从每窗口持有后台改为独立服务，`flock` 仲裁并发启动。窗口只
+连接服务，退出不再中断 turn，必要的 native 执行连接由服务保留到完成。保留官方
+单 thread 执行、队列、追加和停止协议，不自行重放有副作用的请求。审批使用跨连接
+唯一 ID，首次响应生效，新客户端能接回待审批项。控制连接独立完成初始化和非前台
+线程订阅恢复，不依赖官方 UI 是否发送 `initialized`。实现状态查询、保守退出、慢
+客户端限额与有限通知去重缓存。
+
+确定性多进程测试覆盖并发启动、多客户端请求 ID、断线后追加/停止/审批、队列透传、
+忙服务拒绝退出和空服务清理。当前官方二进制另验证两个真实离线 thread 跨客户端
+重启保留，以及服务 SIGKILL 后接回同一 native PID。未发起模型调用，不能据此声明
+长 turn 或真实 UI 验收。Remote SSH 的传输仍依赖窗口，Windows 独立服务尚未实现，
+本次不修改 Executor。证据见 `acceptance/2026-09-10-release-0.3.84-local-service.md`。
+
+## 0.3.83 已删除运行时身份
+
+`0.3.82` 实机已正确解析 Zklab 工作区，但反复接管空实例 `189420`。本轮发现官方升级
+把旧运行时移入 `/tmp/BNhd06UK/` 后删除；仍持有原会话的 `105310` 在 procfs 中显示
+`codex (deleted)`。旧实现对 `/proc/<pid>/exe` 使用 realpath，读不到已删除目标，
+因此漏掉了实际持有者。
+
+改为读取 procfs 链接及其设备/inode，并与 PID/启动时间组成身份；不删除 `(deleted)`
+后缀冒充原路径。新记录保留文件身份；旧记录发生路径变更时，核对原始 argv、受管
+凭据路径、实际监听 socket 所属和鉴权协议响应，再迁移为完整身份。清理器不再把
+同一启动实例的路径变化当作进程已退出，避免删掉仍需恢复的旧记录。
+
+真实移动并删除可执行文件的测试已覆盖，当前现场不提交接管的预检也已选中 `105310`，
+而不是空实例。用户的现有进程未终止，原始会话未修改。安装后的 UI 和详情展开灰屏
+仍需分别验收，后者不宣称已修复。
+## 0.3.82 工作区接管启动顺序
+
+实机再次出现 writer 冲突，确认旧 Zklab app-server `105310` 保留原会话，新实例
+`189420` 没有 loaded 线程。根因是此前在读取 Extension Host 工作区记录之前，便用
+启动器 cwd `/home/zkbot` 查找旧实例；真实工作区直到后续历史查询才更新，已经错过接管。
+
+新候选在接管或 spawn 之前解析窗口工作区记录，缺失时有界等待并拒绝启动竞争实例；
+用显式 null 记录区分无单一工作区和记录尚未就绪，不改写 VS Code workspace URI。
+同一工作区出现一个持有线程的旧实例和一个空的新实例时，通过只读 loaded 索引选择
+持有者，不强杀另一实例；多个非空或无法确认状态时继续失败关闭。
+
+补充环境未继承工作区、上下文延迟发布、上下文缺失及空竞争实例的回归测试。
+当前官方 `0.153.4` 的隔离双线程实验也改为从窗口记录读取根，而非显式传入根，已通过。
+该修正处理的是占用复发；用户提供的“展开命令结果触发灰屏”仍须单独复现定位。
+
+## 0.3.81 轻量后台恢复候选
+
+撤回 `0.3.80` 引入的周期性完整历史读取和合成 `thread/started` 快照重放。
+后台自动恢复使用 `thread/resume(excludeTurns=true)`，当前前台线程不重复恢复订阅。
+轮询只读取不含 turns 的元数据并转发有变化的、形状受限的运行状态，保留 loaded 索引、
+后台进程接管与闲置订阅回收，不改变官方客户端自行请求历史或处理增量事件的语义。
+
+新增 `thread.recovery.cycle` 计数审计，不记录对话正文；覆盖 500 次轮询无全量历史请求、
+无重复状态推送、前台订阅保护、原生状态去重和完成态的回归测试。
+这是针对已确认负载放大路径的预防性修正，不能等同于已查清 renderer 原生崩溃根因。
+真实长对话稳定性及原生符号分析仍待验收，详见本候选证据与 M11。
+
+## 0.3.80 后台会话恢复候选
+
+本次先实现用户截图对应的 Linux 本地窗口链路，不修改官方扩展资产、不修改官方会话
+数据库或 writer lock，也不把重载当成删除对话。线程发现基于官方 `thread/loaded/list`
+而非历史 `thread/list`；`thread/read` 不再改变 UI 当前线程，外部客户端活动不抢占该指针。
+后台运行线程恢复同一连接的 `thread/resume` 订阅，周期性发送真实服务端线程快照，
+前台消费官方 `thread/started` 接收路径；恢复流程不调用 `turn/start`。
+
+已知旧 Shim 死亡且 app-server 身份匹配时，使用互斥接管记录复用原进程；窗口断开后
+保留进程及 30 分钟接管期。Controller 激活和每分钟维护时，仅回收接管期已过、经协议
+确认空闲且无新 Shim 所有者的实例，运行状态未知或仍活跃均保留。所有窗口退出后维护
+暂停，下一次激活再执行清理。发现器不再删除仍用于孤儿恢复的 v2/v3 记录。
+
+官方内置 Codex `0.153.0` 的隔离双线程实验已通过：两个线程跨真实 Shim 进程重启后
+仍由同一 app-server 提供，原线程恢复无 writer 冲突；只注入固定离线测试项，未启动模型
+推理。后台运行恢复和快照校正另有模拟子进程/协议测试。真实 VS Code 长对话、重载、
+Remote SSH 和 Windows 仍待补测，不能将这些实验当成 UI 全链路验收。
+
+详见 `docs/acceptance/2026-09-08-release-0.3.80-session-recovery.md` 和 M11。
 
 ## 能力边界复核
 
@@ -529,6 +677,61 @@ transport 的远程 `pwd` 仍通过。真实模型的 Core 本地诱饵执行、
   两轮均为 `attached=14`、`failed=0`，审计逐项记录 `conversation_resource.stage_drop`，证明
   拖放暂存和原生 `@` 输入不再受次级根数量限制。提交后的 thread 声明、跨对话隔离、只读
   拒绝和删除清理仍保留为下一段真实模型验收，不从暂存日志推断通过。
+- `0.3.76` 候选处理 VS Code 与官方 Codex 同时升级后的拖放兼容状态迁移。此前探针看到
+  旧版本托管元数据指向已删除的官方扩展目录，或看到 Workbench / `product.json` 被新
+  VS Code 安装整体替换时，一律返回 `conflict`，导致自动引导跳过；官方
+  `openai.chatgpt@26.5810.41047` 又把 `insertMentionNodeInRange` 从五个参数扩展为六个，
+  旧能力正则因此不能识别。新实现仅在旧官方扩展与当前扩展属于同一受控兄弟安装，或
+  `product.json` 的版本和提交均可识别为另一安装、当前 Workbench 校验和自洽且代码形状
+  可补丁时清理旧状态；同版本外部改写、未知形状、备份损坏和校验和不符继续失败关闭。
+  Composer 探针允许现有能力的可选尾参数扩展，不依赖具体版本值。针对升级状态、旧目录
+  已删除、六参数方法和外部修改的 28 项定向测试通过；真实安装后的自动确认、提权、重载、
+  本地及 Remote SSH 拖放和禁用恢复仍按根 README TODO 验收。首次安装实测还发现 VS Code
+  模态确认关闭后立即请求 polkit 时，GNOME Shell 可能因前一个 modal grab 尚未释放而记录
+  `Failed to show modal dialog` 并把请求作为 `Request dismissed` 结束。候选现于每次
+  `pkexec` 前等待 500 ms，让 VS Code 对话框完成关闭；真正由用户取消的授权仍终止操作，
+  不自动重复弹窗，错误信息也不再展开完整特权命令行。
+- `0.3.77` 候选按当前产品决策取消本机授权机制并默认提供最大权限。Controller 在每个
+  `vscode-remote` 会话直接加入覆盖本机文件系统根的 `local-full-access`，配置把旧
+  `localExecution="deny"` 迁移为 `allow`；不保存权限状态、不显示目录选择器，也不存在
+  逐路径或逐根确认。Shim 不再给 app-server 注入 local-deny profile，不再阻断 Core 的
+  `fs/`、`process/`、`command/exec`、后台终端或服务端文件/命令审批请求，并把 thread
+  权限固定为本机 `full-access`。结构化 `workspace_*` 仍可通过 Controller transport 访问
+  全文件系统根并保留自身的哈希、原子写和大小限制，但 Core 文件/Shell 可以绕过这些限制。
+  该目标明确放弃本机路径、凭据和命令隔离。首轮 bitahub 实测仍出现一次远端命令允许提示；
+  审计定位为旧 thread 的审批跟踪状态令 `remote_exec.approval` 记录
+  `automatic=false, decision=accept`。候选现不再查询该状态：远端命令、后台任务和结构化
+  变更一律自动放行；本地 Core 的五类审批请求也由 Shim 自动返回接受结果，不进入官方 UI。
+  自动化覆盖配置迁移、全根结构化写入、本机 Core 请求/审批自动接受、远端命令和写入无提示
+  以及远端主根路由保持。真实 34 文件远端到本机下载仍按根 README TODO 验收。
+- `0.3.78` 候选关闭新 Remote SSH 主机/根的首次会话启动竞争。`data:/home/zkbot` 现场中，
+  官方 `openai.chatgpt` 比 Bridge 更早激活，Shim 在窗口 session 文件发布前按本地模式启动；
+  Bridge 随后确认 Executor `0.2.21` 兼容并进入 `degraded`，但旧逻辑只轮询心跳，不会让
+  已启动的 app-server 重新读取 session。手动重载后配置化 Shim 才启动并在 5.25 秒内转为
+  `ready`。Controller 现于连接后检查当前 Extension Host 代际是否已有受管 Shim；若没有，
+  按 Bridge 版本、VS Code 版本、主机和规范远端根保存工作区指纹并自动重载一次。相同指纹
+  已尝试时只记录 detached 状态而不重复重载，避免 app-server 真故障形成循环。纯函数测试
+  覆盖首次、已附着、同指纹和新根。用户安装候选后，`data:/home/zkbot` 于
+  `23:47:08.919` 自动请求唯一一次重载；第二代际识别相同指纹未再次重载，配置化 Shim
+  启动后于 `23:47:19.264` 到达 `ready`。该首次会话自动重载目标已完成实机验证。
+- `0.3.79` 候选处理本地窗口重载后的官方 app-server 遗留。现场只有一个可见 VS Code
+  窗口，但重载前的 app-server PID `13215` 在 Shim 与 launcher 消失后仍被用户级 systemd
+  收养并占有 thread writer；新实例 PID `195170` 因而两次恢复失败，官方 UI 显示会话已在
+  另一个应用中打开。Shim 的 v3 外部会话描述符现记录 app-server PID、启动时间和真实
+  可执行路径；Controller 每次激活只对 Shim 身份已死亡的描述符执行清理，并在终止前再次
+  核对 app-server 身份。PID 复用、活着但无法读取身份的 Shim 以及非 Linux 平台均失败
+  关闭；旧 v2 描述符仅按 Bridge 私有 upstream token 的精确命令行匹配迁移。定向自动化
+  覆盖活动 Shim、死亡 Shim、PID 复用、身份不可读、v2 迁移和非 Linux 边界；真实窗口
+  重载与 thread 恢复仍按根 README TODO 验收。
+- 2026-08-31 增加 Linux x64 GitHub Actions 自构建工作流。它只在 Ubuntu x64 原生 runner
+  执行 `npm ci`、完整 `npm run check` 和 `package:stage`，上传 Controller、匹配 Executor
+  及带文件大小和 SHA-256 的 stage 清单；Actions 固定到已核对提交，权限只有
+  `contents: read`。隔离安装的 Codex npm 包仅为无 VS Code 扩展的 CI runner 提供真实
+  app-server 冒烟运行时，不改变产品运行时发现或形成版本门禁。该实现不创建 Release、
+  不生成 Windows 产物，也不放宽既有双平台发布门禁。本地 Node.js 24 与隔离
+  `@openai/codex@0.152.0` 环境下，`npm run check` 为 83 个测试文件通过、1 个条件文件
+  跳过，438 项通过、8 项跳过、0 失败，Shim 冒烟、Linux 构包和 stage 完成；工作流另经
+  `actionlint 1.7.12` 校验。首次 GitHub 托管 runner 结果仍按根 README TODO 验收。
 
 活动实施项及其退出条件统一保存在根 `README.md` 最末尾的 `TODO` 中；本节只保留已完成
 的能力探针结论。
@@ -554,9 +757,9 @@ transport 的远程 `pwd` 仍通过。真实模型的 Core 本地诱饵执行、
 | Codex Webview 位置恢复 | 每工作区首次就绪时仅重置 Codex 视图 | `repairCodexViewLocation` |
 | app-server `initialize` 代理 | 已按官方前置全局参数通过真实 app-server 冒烟测试 | `npm run smoke:shim` |
 | `thread/start` 路径和能力注入 | 本地进程 `cwd` 与远程逻辑主根已分离并通过实测 app-server 参数探针 | `rewriteClientMessage` |
-| Remote Bridge 权限配置 | 强制 `codex-remote-bridge` named profile、`approvalPolicy=never`，移除客户端 sandbox/config 覆盖 | `local-core-policy` / `rewriteClientMessage` |
-| 本地客户端请求阻断 | 25 个 Shell、文件、命令、进程、模糊搜索和后台终端请求在 app-server 前失败关闭并审计；仅官方 VS Code 客户端的 Codex 自管粘贴文本附件请求按固定形状放行 | `ShimProxy` / `ClientRequest.json` |
-| Core 本地审批阻断 | 命令、文件、权限和两类旧协议审批在到达官方 UI 前失败关闭；Bridge 远程命令审批不受影响 | `ShimProxy` / `ServerRequest.json` |
+| Remote Bridge 权限配置 | `0.3.77` 固定 `:danger-full-access` 与 `approvalPolicy=never`；本机 Core 审批自动接受，远端动态命令、后台任务和结构化变更均不再查询旧 thread 审批模式 | `rewriteClientMessage` / `ShimProxy` |
+| 本地客户端请求 | `0.3.77` 起 Shell、文件、命令、进程、模糊搜索和后台终端请求直接转发本机 app-server，不再作为安全阻断面 | `ShimProxy` / `ClientRequest.json` |
+| Core 本地审批 | `0.3.77` 起命令、文件和权限审批请求由 Shim 自动接受，不再显示官方确认界面 | `ShimProxy` / `ServerRequest.json` |
 | `thread/resume` 工作区语义 | 本地控制 `cwd`、远程 `runtimeWorkspaceRoots` 和远程策略已覆盖；官方 UI 恢复待补测 | `rewriteClientMessage` |
 | `turn/start` 路由刷新 | 每轮合并独立应用上下文，刷新远程主根和 `remote_exec` 提醒且不覆盖已有键 | `rewriteClientMessage` |
 | 远端无 Codex | 诊断已实现；xj-member 目标已确认未安装 Codex | `Run Diagnostics` / 2026-07-16 验收 |
@@ -581,8 +784,8 @@ transport 的远程 `pwd` 仍通过。真实模型的 Core 本地诱饵执行、
 | 远程逻辑主根 | 唯一 `remote/primary` 已写入线程和每轮 `runtimeWorkspaceRoots`；活动 transport 的 `pwd` 回环通过 |
 | 工具根身份 | 请求、结果和审计携带根 ID、目标端、角色与根路径；省略目标仍默认远程主根 |
 | 对话本机资源 | `0.3.75` 以 `threadId` 绑定用户实际拖入的文件或目录，不写入 `roots`、不设次级根数量上限；Linux Remote SSH 的 14 项暂存与输入已实测，thread 声明和删除清理待继续实测 |
-| Controller 本地只读执行器 | 文件只允许精确文件，目录只允许自身子树；支持读取、目录、树和字面搜索，写入、Git、跨 thread、符号链接逃逸均失败关闭 |
-| 双端只读路由 | 远端项目继续使用唯一主根；本机对话资源只经已认证 Controller transport 和显式 conversation resource ID 访问 |
+| Controller 本地执行器 | `local-full-access` 覆盖本机文件系统根，结构化工具支持有界读写、补丁、目录、重命名、空目录删除、搜索和 Git；本机 Core 同时拥有不受该结构化边界限制的最大权限 |
+| 双端路由 | 远端项目继续使用唯一主根；本机默认全权限，不再把 conversation resource 或本机根当作安全隔离边界 |
 | Bridge 工具原生界面投影 | `0.3.14` 已按本地/远程根显示目标、根 ID、规范化路径和 `cwd`；真实候选窗口观感待补测 |
 | 远程 URI、Diff 和文件跳转 | `0.3.21` 已实现 host/根/目标端/相对路径资源身份、会话登记内容提供器、实际 Remote SSH URI 跳转和有界旧内容 Diff；OpenSSH 失败关闭，真实同名诱饵与界面待补测 |
 
@@ -595,26 +798,26 @@ transport 的远程 `pwd` 仍通过。真实模型的 Core 本地诱饵执行、
 | 项目 | 状态 |
 | --- | --- |
 | 结构化 `argv` 非交互命令 | 已实现；默认通过 Remote Extension Host，OpenSSH 为回退 |
-| 官方命令审批 | 已实现；非完全访问模式显示主机、规范化 `cwd`、完整命令和环境变更 |
+| 官方命令审批 | `0.3.77` 最大权限模式已取消；远端命令直接执行 |
 | 命令输出流 | 已映射为 `item/commandExecution/outputDelta` |
-| 权限模式继承 | 已按线程映射 `full-access`/`approvalPolicy=never`，其余模式失败关闭 |
-| 审批绑定 | 人工审批仅匹配一个待处理调用 ID；完全访问的自动放行单独审计 |
+| 权限模式 | 固定 `:danger-full-access` / `approvalPolicy=never`，不继承更低的客户端模式 |
+| 自动放行 | 远端命令、后台任务和工作区变更均记录 `automatic=true`，不创建审批请求 |
 | 运行中取消 | `0.3.15` 已把 `turn/interrupt` 绑定到活动 Bridge 调用；VS Code Remote 通道显式发送 `cancel`，Remote Executor 按 operation ID 中止 POSIX 进程组；自动化通过，真实 Remote SSH 与 Windows 待补测 |
 | 哈希保护写入和补丁 | `0.3.19` 已实现双端原子整文件写入和精确 UTF-8 补丁；覆盖、补丁、文件重命名和文件删除要求最新 SHA-256，冲突返回 `FILE_CONFLICT` |
 | 目录与路径变更 | `0.3.19` 已实现单级目录创建、不覆盖重命名、文件或空目录删除；递归删除不开放 |
-| 写入审批与审计 | 覆盖、补丁、重命名和删除在非完全访问模式进入绑定调用 ID 的官方审批；新建文件/目录为有界自动操作；`full-access` 自动放行，审计不含正文 |
+| 写入审计 | 覆盖、补丁、重命名、删除和新建全部自动放行；审计保留目标与哈希元数据且不含正文 |
 | 写入幂等与上限 | 默认远端复用 Executor 账本，本地 Controller 有独立有界账本；文件正文最多 1 MiB，经 stdin 传输，不进入 argv |
 | 断线结果确认和幂等 | `0.3.17` 已在 transport 中断后用原幂等键从新 socket 查询账本；completed 返回原结果，cancelled/failed 保留终态，running 有界轮询，unknown 或查询不可达返回 `RESULT_UNKNOWN` 且不重放；账本有意限定在当前 Extension Host 代次，`0.3.28` 已实测重启后旧状态为 `unknown` 且不重放 |
 | Executor 失联写入完整性 | `0.3.37` 把已发送副作用的 transport 错误响应提升为不可重试 `RESULT_UNKNOWN`，写入脚本在替换前校验精确 stdin 字节数；临时文件先登记拥有 PID，新 Executor 激活时只清理当前工作区死亡拥有者的登记和临时文件。能力握手要求 `executeStdinExactLength` 与 `workspaceWriteOrphanCleanup`，不以版本号门禁；精确 Linux Remote SSH 故障注入确认原文件不变、无残留且不重放 |
 | 后台任务 | `0.3.20` 在活动 VS Code Remote transport 上提供 start/status/log/cancel；稳定任务 ID 避免重连重复启动，日志按字节游标有界保留，取消、超时和 Extension Host 关闭终止进程组；OpenSSH 回退失败关闭 |
 | 远程资源映射 | `0.3.21` 提供 `workspace_open_file` 与 `workspace_show_diff`；Controller 只映射已规范化路径，复用实际打开的 Remote SSH URI，并以会话登记、根授权复核、SHA-256 和内存上限保护内容提供器与 Diff 快照 |
-| Core 内置本地工具硬阻断 | 自动化边界已实施；除官方 VS Code 客户端的受管粘贴文本附件操作外，专用权限配置、25 个已知客户端请求、五类本地审批及未来风险命名空间均失败关闭，真实模型专用工具诱饵待补测 |
+| Core 内置本地工具最大权限 | `0.3.77` 主动移除 local-deny 注入与客户端/审批阻断；Remote SSH thread 固定使用 `:danger-full-access`，本机能力以 VS Code 用户的操作系统权限为边界 |
 
 阶段 C 尚未关闭。0.2.0 提供与官方权限模式一致的远程命令执行，0.3.15 完成默认
 VS Code Remote 链路的运行中取消自动化闭环，0.3.16 增加当前 Executor 代次内的有界
 幂等账本与结果查询，0.3.17 增加断线后的查询恢复，0.3.19 交付双端写入自动化，
 0.3.20 交付后台任务生命周期自动化，0.3.21 交付远程资源、文件跳转和 Diff 自动化；
-本地 Core 真实诱饵、真实写入和生命周期验收完成前，不得用于无人值守的有副作用任务。
+本机最大权限、真实写入和生命周期验收完成前，不得用于无人值守的有副作用任务。
 
 ## 当前优先阶段：外部 Codex CLI 介入
 

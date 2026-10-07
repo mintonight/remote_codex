@@ -8,6 +8,7 @@ export const CODEX_REMOTE_INLINE_MENTION_PATH_PREFIX =
   ".__codex_remote_bridge_remote_3c4ca1f4b3d74649__";
 export const CODEX_WEBVIEW_DROP_CHANNEL =
   "codex-remote-bridge-webview-drop-v1";
+export const CODEX_DROP_READY_COMMAND = "codexRemoteBridge.dropReady";
 
 const IDENTIFIER = "[A-Za-z_$][\\w$]*";
 const ADD_CONTEXT_FILE_HANDLER = new RegExp(
@@ -15,7 +16,7 @@ const ADD_CONTEXT_FILE_HANDLER = new RegExp(
   "g",
 );
 const INSERT_MENTION_METHOD = new RegExp(
-  `insertMentionNodeInRange\\((${IDENTIFIER}),(${IDENTIFIER}),(${IDENTIFIER}),(${IDENTIFIER})(?:,(${IDENTIFIER})=[^)]*)?\\)\\{`,
+  `insertMentionNodeInRange\\((${IDENTIFIER}),(${IDENTIFIER}),(${IDENTIFIER}),(${IDENTIFIER})(?:,${IDENTIFIER}(?:=[^,)]*)?){0,4}\\)\\{`,
   "g",
 );
 const INSERT_AT_MENTION_METHOD = new RegExp(
@@ -94,7 +95,12 @@ export function inspectCodexInlineMentionSource(
     PATCH_START,
     "if(typeof globalThis.addEventListener===\"function\"&&!globalThis.__codexRemoteBridgeWebviewDropV1){",
     "globalThis.__codexRemoteBridgeWebviewDropV1=!0;",
+    "let CodexRemoteBridgeReadyUntil=0,CodexRemoteBridgeProbeAt=-Infinity,CodexRemoteBridgeNonce;",
+    "let CodexRemoteBridgeProbe=()=>{let now=Date.now();if(now-CodexRemoteBridgeProbeAt<500)return;CodexRemoteBridgeProbeAt=now;CodexRemoteBridgeNonce=globalThis.crypto?.randomUUID?.()??String(Math.random())+String(now);try{globalThis.top?.postMessage({channel:" + JSON.stringify(CODEX_WEBVIEW_DROP_CHANNEL) + ",phase:\"probe\",nonce:CodexRemoteBridgeNonce},\"*\")}catch{}};",
+    "globalThis.addEventListener(\"message\",event=>{let data=event.data;if(event.source!==globalThis.top||data?.channel!==" + JSON.stringify(CODEX_WEBVIEW_DROP_CHANNEL) + ")return;if(data.phase===\"probe-request\"){CodexRemoteBridgeProbe();return}if(data.phase===\"ready\"&&typeof CodexRemoteBridgeNonce===\"string\"&&data.nonce===CodexRemoteBridgeNonce&&Date.now()-CodexRemoteBridgeProbeAt<1000)CodexRemoteBridgeReadyUntil=Date.now()+1500});",
+    "CodexRemoteBridgeProbe();",
     "let CodexRemoteBridgePostDrop=(CodexRemoteBridgePhase,CodexRemoteBridgeEvent)=>{",
+    "CodexRemoteBridgeProbe();if(Date.now()>=CodexRemoteBridgeReadyUntil)return;",
     "let CodexRemoteBridgeTransfer=CodexRemoteBridgeEvent.dataTransfer;",
     "if(!CodexRemoteBridgeTransfer)return;",
     "let CodexRemoteBridgeTypes=Array.from(CodexRemoteBridgeTransfer.types??[],CodexRemoteBridgeType=>String(CodexRemoteBridgeType).toLowerCase()),",

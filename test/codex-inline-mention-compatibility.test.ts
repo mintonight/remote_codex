@@ -141,6 +141,7 @@ describe("official Codex inline mention compatibility", () => {
     await writeFile(current.target, olderPatched, "utf8");
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
 
+    await expect(inspectCodexInlineMentionCompatibility(options)).resolves.toMatchObject({ status: "update-available" });
     await expect(enableCodexInlineMentionCompatibility(options)).resolves.toMatchObject({
       status: "patched",
       changed: true,
@@ -178,6 +179,68 @@ describe("official Codex inline mention compatibility", () => {
     expect(await readFile(upgradedTarget, "utf8")).toContain(
       "codex-remote-bridge-inline-file-mention:v1:start",
     );
+  });
+
+  it("reports an upgraded official sibling as ready before enabling it", async () => {
+    const current = await fixture("1.0.0");
+    await enableCodexInlineMentionCompatibility({
+      extensionPath: current.extensionPath,
+      extensionVersion: "1.0.0",
+      stateDirectory: current.stateDirectory,
+    });
+    const upgradedPath = join(dirname(current.extensionPath), "openai.chatgpt-1.1.0");
+    const upgradedTarget = join(
+      upgradedPath,
+      "webview",
+      "assets",
+      "app-initial-main.js",
+    );
+    await mkdir(dirname(upgradedTarget), { recursive: true });
+    await writeFile(upgradedTarget, current.source, "utf8");
+
+    await expect(
+      inspectCodexInlineMentionCompatibility({
+        extensionPath: upgradedPath,
+        extensionVersion: "1.1.0",
+        stateDirectory: current.stateDirectory,
+      }),
+    ).resolves.toMatchObject({
+      status: "disabled",
+      changed: false,
+      targetPath: upgradedTarget,
+    });
+  });
+
+  it("cleans stale state when an upgraded official sibling replaced the old asset", async () => {
+    const current = await fixture("1.0.0");
+    await enableCodexInlineMentionCompatibility({
+      extensionPath: current.extensionPath,
+      extensionVersion: "1.0.0",
+      stateDirectory: current.stateDirectory,
+    });
+    await rm(current.extensionPath, { recursive: true, force: true });
+    const upgradedPath = join(dirname(current.extensionPath), "openai.chatgpt-1.1.0");
+    const upgradedTarget = join(
+      upgradedPath,
+      "webview",
+      "assets",
+      "app-initial-main.js",
+    );
+    await mkdir(dirname(upgradedTarget), { recursive: true });
+    await writeFile(upgradedTarget, current.source, "utf8");
+
+    await expect(
+      inspectCodexInlineMentionCompatibility({
+        extensionPath: upgradedPath,
+        extensionVersion: "1.1.0",
+        stateDirectory: current.stateDirectory,
+      }),
+    ).resolves.toMatchObject({
+      status: "disabled",
+      changed: false,
+      targetPath: upgradedTarget,
+    });
+    expect(await readdir(current.stateDirectory)).toEqual([]);
   });
 
   it("does not trust a metadata target outside the official extension", async () => {

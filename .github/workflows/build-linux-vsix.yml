@@ -1,0 +1,74 @@
+name: Build Linux x64 VSIX
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-vsix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODEX_SMOKE_VERSION: "0.152.0"
+
+jobs:
+  build-linux:
+    name: Build and verify Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install desktop entry test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y desktop-file-utils
+
+      - name: Install project dependencies
+        run: npm ci
+
+      - name: Install isolated Codex smoke runtime
+        shell: bash
+        run: |
+          codex_root="${RUNNER_TEMP}/codex-smoke-runtime"
+          npm install \
+            --prefix "${codex_root}" \
+            --no-save \
+            --package-lock=false \
+            "@openai/codex@${CODEX_SMOKE_VERSION}"
+          codex_executable="${codex_root}/node_modules/.bin/codex"
+          test -x "${codex_executable}"
+          "${codex_executable}" --version
+          {
+            echo "CODEX_BRIDGE_DEVELOPMENT_CODEX_EXECUTABLE=${codex_executable}"
+            echo "CODEX_BRIDGE_DEVELOPMENT_EXTENSION_VERSION=npm-${CODEX_SMOKE_VERSION}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Check, build, smoke test, and package
+        run: npm run check
+
+      - name: Stage verified Linux artifacts
+        run: npm run package:stage
+
+      - name: Upload Linux stage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-remote-bridge-linux-x64-${{ github.sha }}
+          path: artifacts/controller-*-linux-x64/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, copyFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import WebSocket from "ws";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuditLog } from "../src/core/audit-log.js";
 import { parseBridgeConfig } from "../src/core/config.js";
 import {
   bridgeExternalCliSessionPath,
@@ -23,6 +24,8 @@ import {
   listVsCodeConversations,
   readVsCodeConversation,
 } from "../src/shim/vscode-conversation-client.js";
+import { inspectProcessIdentities } from "../src/shim/process-identity.js";
+import { saveLocalWorkspaceContext } from "../src/core/local-workspace-context.js";
 
 const originalStateDirectory = process.env.CODEX_BRIDGE_STATE_DIR;
 
@@ -76,12 +79,20 @@ function fakeWebSocketAppServer(
           return;
         }
         if (message.method === "thread/start" || message.method === "thread/resume") {
-          const thread = { id: "thread-shared" };
+          const thread = { id: message.params?.threadId ?? "thread-shared", cwd: message.params?.cwd ?? args[args.indexOf("--fake-workspace") + 1] };
           socket.send(JSON.stringify({
             id: message.id,
             result: { thread, observedParams: message.params },
           }));
           notify(socket, { method: "thread/started", params: { thread } });
+          return;
+        }
+        if (message.method === "thread/loaded/list") {
+          socket.send(JSON.stringify({ id: message.id, result: { data: args.includes("--fake-empty") ? [] : ["thread-shared"], nextCursor: null } }));
+          return;
+        }
+        if (message.method === "thread/unsubscribe") {
+          socket.send(JSON.stringify({ id: message.id, result: { status: "unsubscribed" } }));
           return;
         }
         if (message.method === "thread/list") {
@@ -98,7 +109,7 @@ function fakeWebSocketAppServer(
         if (message.method === "thread/read") {
           socket.send(JSON.stringify({
             id: message.id,
-            result: {},
+            result: args.includes("--fake-workspace") ? { thread: { id: message.params.threadId, cwd: args[args.indexOf("--fake-workspace") + 1], status: { type: "active" }, turns: [] } } : {},
           }));
           return;
         }
@@ -195,7 +206,7 @@ function fakeWebSocketAppServer(
     });
     process.on("SIGTERM", () => server.close(() => process.exit(0)));
   `;
-  return spawn(process.execPath, ["-e", source], {
+  return spawn(command.startsWith("/") ? command : process.execPath, ["-e", source, "--", "app-server", ...args], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -260,36 +271,218 @@ function collectJsonLines(
 }
 
 describe("SharedAppServer", () => {
-  it(
-    "replaces stdio transport and stale websocket credentials",
-    () => {
-      expect(
-        withSharedWebSocketTransport(
-          [
-            "-c",
-            "feature=true",
-            "app-server",
-            "--listen",
-            "stdio://",
-            "--ws-auth",
-            "signed-bearer-token",
-            "--ws-shared-secret-file",
-            "/tmp/old",
-          ],
-          "ws://127.0.0.1:3456",
-          "/tmp/new-token",
-        ),
-      ).toEqual([
-        "-c",
-        "feature=true",
-        "app-server",
-        "--listen",
+
+  it("does not lose initialize callbacks while the connection audit is delayed", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-audit-race-"));
+    process.env.CODEX_BRIDGE_STATE_DIR = directory;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    const seen = new Promise<void>((done) => { entered = done; });
+    const original = AuditLog.prototype.write;
+    const spy = vi.spyOn(AuditLog.prototype, "write").mockImplementation(async function (this: AuditLog, event) {
+      if (event.operation === "external_cli.connect") { entered(); await gate; }
+      await original.call(this, event);
+    });
+    const input = new PassThrough(), output = new PassThrough(), errors = new PassThrough();
+    errors.resume();
+    const messages = collectJsonLines(output);
+    const server = new SharedAppServer({ appServerArgs: ["app-server"], auditPath: join(directory, "audit.jsonl"),
+      codexExecutable: "fixture", config: null, controlDir: directory, input, output, errorOutput: errors,
+      spawnCodex: fakeWebSocketAppServer });
+    const running = server.run();
+    let socket: WebSocket | undefined;
+    try {
+      input.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "test", version: "1" } } }) + "\n");
+      await waitFor(() => messages.find((m) => m.id === 1));
+      const descriptor = await waitFor(async () => { const d = await readDescriptor(bridgeExternalCliSessionPath()); return d?.lifecycle === "ready" ? d : undefined; });
+      socket = new WebSocket(descriptor.endpoint, { headers: { Authorization: `Bearer ${await readFile(descriptor.tokenPath, "utf8")}` } });
+      const external: Array<Record<string, unknown>> = [];
+      socket.on("message", (raw) => external.push(JSON.parse(raw.toString())));
+      await new Promise<void>((done, reject) => { socket!.once("open", done); socket!.once("error", reject); });
+      await seen;
+      socket.send(JSON.stringify({ id: 77, method: "initialize", params: { clientInfo: { name: "late-audit", version: "1" } } }));
+      await new Promise((done) => setTimeout(done, 50));
+      release();
+      expect(await waitFor(() => external.find((m) => m.id === 77))).toMatchObject({ result: { userAgent: "fake" } });
+    } finally {
+      release(); socket?.terminate(); input.end(); await running; spy.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not delete existing recovery state when input was already closed before startup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-closed-input-"));
+    process.env.CODEX_BRIDGE_STATE_DIR = directory;
+    await mkdir(join(directory, "external-cli"));
+    const path = bridgeExternalCliSessionPath();
+    await writeFile(path, "existing recovery journal");
+    const input = new PassThrough();
+    input.destroy();
+    const server = new SharedAppServer({ appServerArgs: ["app-server"], auditPath: join(directory, "audit.jsonl"),
+      codexExecutable: "must-not-spawn", config: null, controlDir: directory, input,
+      spawnCodex: () => { throw new Error("Closed input must not spawn"); } });
+    try {
+      await expect(server.run()).resolves.toBe(0);
+      expect(await readFile(path, "utf8")).toBe("existing recovery journal");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("refuses to spawn before the expected workspace context is published", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-missing-context-"));
+    process.env.CODEX_BRIDGE_STATE_DIR = directory;
+    const input = new PassThrough();
+    const server = new SharedAppServer({ appServerArgs: ["app-server"], auditPath: join(directory, "audit.jsonl"),
+      codexExecutable: "must-not-spawn", config: null, controlDir: directory, input, persistentSession: true,
+      localWorkspaceContextPath: join(directory, "missing.json"), workspaceContextTimeoutMs: 25,
+      spawnCodex: () => { throw new Error("Must not guess a launcher cwd"); } });
+    try { await expect(server.run()).rejects.toThrow("workspace context is not ready"); }
+    finally { input.destroy(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(["inherited", "context-file", "delayed-context", "context-and-empty", "deleted-legacy", "deleted-legacy-and-empty", "deleted-legacy-bad-token-and-empty"])("reclaims a detached server using %s workspace identity before spawn", async (contextSource) => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-handoff-integration-"));
+    process.env.CODEX_BRIDGE_STATE_DIR = directory;
+    const registry = join(directory, "external-cli");
+    await mkdir(registry, { recursive: true });
+    const deadPid = 2_147_483_647;
+    const upstreamTokenPath = join(registry, `${deadPid}.upstream.token`);
+    await writeFile(upstreamTokenPath, "handoff-test-token", { mode: 0o600 });
+    const net = await import("node:net");
+    const listener = net.createServer();
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const port = (listener.address() as import("node:net").AddressInfo).port;
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    const endpoint = `ws://127.0.0.1:${port}`;
+    const legacyDeleted = contextSource.startsWith("deleted-legacy");
+    const binary = join(directory, "old-extension-node");
+    if (legacyDeleted) await copyFile(process.execPath, binary);
+    const child = fakeWebSocketAppServer(legacyDeleted ? binary : "fake-codex", ["--listen", endpoint, "--ws-token-file", upstreamTokenPath, "--fake-workspace", directory]);
+    const childExit = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const errors = new PassThrough();
+    let diagnostic = "";
+    errors.on("data", (chunk) => { diagnostic += String(chunk); });
+    const messages = collectJsonLines(output);
+    let running: Promise<number> | undefined;
+    let emptyChild: ChildProcessWithoutNullStreams | undefined;
+    let emptyExit: Promise<void> | undefined;
+    try {
+      await waitFor(() => new Promise<boolean | undefined>((resolve) => {
+        const probe = new WebSocket(endpoint, { headers: { Authorization: "Bearer handoff-test-token" } });
+        probe.once("open", () => { probe.close(); resolve(true); });
+        probe.once("error", () => resolve(undefined));
+      }));
+      const appServer = await waitFor(async () => (await inspectProcessIdentities([child.pid!])).get(child.pid!));
+      if (legacyDeleted) {
+        delete appServer.executableFileId;
+        const relocated = join(directory, "removed-by-upgrade");
+        await rename(binary, relocated);
+        await rm(relocated);
+      }
+      await writeFile(join(registry, `${deadPid}.json`), JSON.stringify({ version: 3,
+        pid: deadPid, startedAtMs: 1, executablePath: process.execPath, appServer,
+        endpoint, upstreamEndpoint: endpoint, host: "local", workspaceRoot: directory,
+        tokenEnv: "CODEX_BRIDGE_EXTERNAL_SESSION_TOKEN", tokenPath: join(registry, `${deadPid}.token`), lifecycle: "detached" }), { mode: 0o600 });
+      const contextPath = join(directory, "local-workspaces", "987.json");
+      if (contextSource === "context-file" || contextSource === "context-and-empty" || legacyDeleted) await saveLocalWorkspaceContext(contextPath, directory);
+      if (contextSource === "context-and-empty" || contextSource.endsWith("-and-empty")) {
+        const emptyPid = deadPid - 1;
+        const emptyToken = join(registry, `${emptyPid}.upstream.token`);
+        await writeFile(emptyToken, "empty-test-token", { mode: 0o600 });
+        await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+        const emptyEndpoint = `ws://127.0.0.1:${(listener.address() as import("node:net").AddressInfo).port}`;
+        await new Promise<void>((resolve) => listener.close(() => resolve()));
+        emptyChild = fakeWebSocketAppServer("fake-codex", ["--listen", emptyEndpoint, "--ws-token-file", emptyToken, "--fake-empty"]);
+        emptyExit = new Promise<void>((resolve) => emptyChild!.once("exit", () => resolve()));
+        await waitFor(() => new Promise<boolean | undefined>((resolve) => {
+          const probe = new WebSocket(emptyEndpoint, { headers: { Authorization: "Bearer empty-test-token" } });
+          probe.once("open", () => { probe.close(); resolve(true); });
+          probe.once("error", () => resolve(undefined));
+        }));
+        const emptyIdentity = (await inspectProcessIdentities([emptyChild.pid!])).get(emptyChild.pid!);
+        await writeFile(join(registry, `${emptyPid}.json`), JSON.stringify({ version: 3, pid: emptyPid,
+          startedAtMs: 2, executablePath: process.execPath, appServer: emptyIdentity, endpoint: emptyEndpoint,
+          upstreamEndpoint: emptyEndpoint, host: "local", workspaceRoot: directory, lifecycle: "detached" }), { mode: 0o600 });
+      }
+      const contextReady = contextSource === "delayed-context"
+        ? new Promise<void>((resolve, reject) => setTimeout(() => {
+          void saveLocalWorkspaceContext(contextPath, directory).then(resolve, reject);
+        }, 75)) : Promise.resolve();
+      if (contextSource.includes("bad-token")) await writeFile(upstreamTokenPath, "invalid-capability", { mode: 0o600 });
+      const server = new SharedAppServer({ appServerArgs: ["app-server"], appServerCwd: join(directory, "launcher-home"),
+        auditPath: join(directory, "audit.jsonl"), codexExecutable: "must-not-spawn", config: null,
+        controlDir: directory, ...(contextSource === "inherited" ? { localWorkspaceRoot: directory } : { localWorkspaceContextPath: contextPath }),
+        input, output, errorOutput: errors, persistentSession: true,
+        spawnCodex: () => { throw new Error("Handoff must not spawn a second writer"); } });
+      running = server.run();
+      if (contextSource.includes("bad-token")) {
+        await expect(running).rejects.toThrow("identity is unverifiable");
+        expect(child.exitCode).toBeNull();
+        return;
+      }
+      await contextReady;
+      input.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: {} } }) + "\n");
+      await waitFor(() => messages.find((message) => message.id === 1));
+      input.write(JSON.stringify({ method: "initialized", params: {} }) + "\n");
+      await waitFor(() => messages.find((message) => message.method === "thread/started")).catch((error) => {
+        throw new Error(`${String(error)}; recovery diagnostic=${diagnostic}; methods=${messages.map((message) => message.method ?? message.id).join(",")}`);
+      });
+      const descriptor = await waitFor(async () => {
+        const value = await readDescriptor(bridgeExternalCliSessionPath());
+        return value?.loadedThreadIds?.includes("thread-shared") ? value : undefined;
+      });
+      expect(descriptor.appServer?.pid).toBe(child.pid);
+      if (legacyDeleted) expect(descriptor.appServer?.executableFileId).toMatch(/^\d+:\d+$/);
+      expect(descriptor.workspaceRoot).toBe(directory);
+      expect(descriptor.threadId).toBeUndefined();
+      input.end();
+      await expect(running).resolves.toBe(0);
+      expect(child.exitCode).toBeNull();
+      if (emptyChild) expect(emptyChild.exitCode).toBeNull();
+      expect(await readDescriptor(bridgeExternalCliSessionPath())).toMatchObject({ lifecycle: "detached", appServer: { pid: child.pid } });
+      await expect(readFile(join(registry, `${deadPid}.json`))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      input.destroy();
+      emptyChild?.kill("SIGKILL");
+      await emptyExit;
+      child.kill("SIGKILL");
+      await childExit;
+      await running?.catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces stdio transport and stale websocket credentials", () => {
+    expect(
+      withSharedWebSocketTransport(
+        [
+          "-c",
+          "feature=true",
+          "app-server",
+          "--listen",
+          "stdio://",
+          "--ws-auth",
+          "signed-bearer-token",
+          "--ws-shared-secret-file",
+          "/tmp/old",
+        ],
         "ws://127.0.0.1:3456",
-        "--ws-auth",
-        "capability-token",
-        "--ws-token-file",
         "/tmp/new-token",
-      ]);
+      ),
+    ).toEqual([
+      "-c",
+      "feature=true",
+      "app-server",
+      "--listen",
+      "ws://127.0.0.1:3456",
+      "--ws-auth",
+      "capability-token",
+      "--ws-token-file",
+      "/tmp/new-token",
+    ]);
+  });
   });
 
   it.skipIf(process.env.GITHUB_ACTIONS === "true")(
@@ -339,9 +532,8 @@ describe("SharedAppServer", () => {
     const running = server.run();
 
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-    await expect(readFile(bridgeExternalCliSessionPath(), "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    const startupDescriptor = await waitFor(() => readDescriptor(bridgeExternalCliSessionPath()));
+    expect(startupDescriptor.lifecycle).toBe("starting");
     input.write(
       `${JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: {} } })}\n`,
     );
@@ -374,7 +566,12 @@ describe("SharedAppServer", () => {
       return current?.threadId === "thread-shared" ? current : undefined;
     });
     expect(descriptor).toMatchObject({
-      version: 2,
+      version: 3,
+      appServer: {
+        executablePath: realpathSync.native(process.execPath),
+        pid: expect.any(Number),
+        startedAtMs: expect.any(Number),
+      },
       executablePath: realpathSync.native(process.execPath),
       pid: process.pid,
     });
@@ -526,7 +723,7 @@ describe("SharedAppServer", () => {
     });
     expect(externalMessages).toContainEqual(expect.objectContaining({
       id: 11,
-      result: expect.objectContaining({ thread: { id: "thread-shared" } }),
+      result: expect.objectContaining({ thread: expect.objectContaining({ id: "thread-shared" }) }),
     }));
     expect(externalMessages).toContainEqual({
       id: 13,
@@ -902,7 +1099,7 @@ describe("SharedAppServer", () => {
       spawnCodex: fakeWebSocketAppServer,
       spawnSsh: () => {
         sshSpawns += 1;
-        return spawn(process.execPath, ["-e", "process.exit(0)"], {
+        return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
           stdio: "pipe",
         });
       },
@@ -934,9 +1131,6 @@ describe("SharedAppServer", () => {
     external.on("message", (data) => {
       const message = JSON.parse(data.toString()) as Record<string, unknown>;
       externalMessages.push(message);
-      if (message.method === "item/commandExecution/requestApproval") {
-        external.close(1_000, "acceptance-disconnect");
-      }
     });
     await new Promise<void>((resolvePromise, reject) => {
       external.once("open", resolvePromise);
@@ -967,6 +1161,8 @@ describe("SharedAppServer", () => {
       }),
     );
 
+    await waitFor(() => (sshSpawns === 1 ? true : undefined));
+    external.close(1_000, "acceptance-disconnect");
     await externalClosed;
     await waitFor(() =>
       vscodeMessages.some((message) => {
@@ -984,7 +1180,7 @@ describe("SharedAppServer", () => {
         ? true
         : undefined,
     );
-    expect(sshSpawns).toBe(0);
+    expect(sshSpawns).toBe(1);
 
     input.end();
     await expect(running).resolves.toBe(0);
@@ -1043,15 +1239,16 @@ describe("SharedAppServer", () => {
         params: { threadId: "thread-shared", includeTurns: false },
       })}\n`,
     );
+    await waitFor(() => vscodeMessages.find((message) => message.id === 2));
     const restoredDescriptor = await waitFor(async () => {
       const current = await readDescriptor(bridgeExternalCliSessionPath());
-      return current?.threadId === "thread-shared" ? current : undefined;
+      return current?.lifecycle === "ready" ? current : undefined;
     });
     expect(restoredDescriptor).toMatchObject({
       host: "local",
       workspaceRoot: directory,
-      threadId: "thread-shared",
     });
+    expect(restoredDescriptor.threadId).toBeUndefined();
     input.write(
       `${JSON.stringify({
         id: 3,

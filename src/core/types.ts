@@ -62,7 +62,7 @@ export interface BridgeConfig {
   /** Runtime compatibility alias for the unique remote primary root. */
   workspaceRoot: string;
   connectionMode: "openssh" | "vscode-remote";
-  localExecution: "deny";
+  localExecution: "allow";
   remoteHelper: "none" | "vscode-extension";
   sshUser?: string;
   sshPort?: number;
@@ -89,6 +89,7 @@ export interface RemoteIdentity {
   hostname: string;
   machineId: string;
   workspaceRoot: string;
+  homeDirectory?: string;
 }
 
 export interface ToolRequestContext {

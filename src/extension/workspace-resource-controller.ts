@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import * as vscode from "vscode";
+import { REMOTE_HOME_ACCESS_ROOT_ID } from "../core/config.js";
 import { BridgeError } from "../core/errors.js";
 import type { BridgeConfig, WorkspaceToolRoot } from "../core/types.js";
 import type {
@@ -185,6 +186,7 @@ export class WorkspaceResourceController
     threadId: string,
     rootId: string,
   ) => WorkspaceToolRoot | undefined;
+  readonly #canonicalRemoteHomePath: ((path: string) => Promise<string>) | undefined;
   readonly #resources = new Map<string, ResolvedResource>();
   readonly #snapshots = new Map<string, Snapshot>();
   #pendingEditorContext: RemoteEditorContext | null = null;
@@ -196,9 +198,11 @@ export class WorkspaceResourceController
       threadId: string,
       rootId: string,
     ) => WorkspaceToolRoot | undefined,
+    canonicalRemoteHomePath?: (path: string) => Promise<string>,
   ) {
     this.#config = config;
     this.#resolveAuthorizedRoot = resolveAuthorizedRoot;
+    this.#canonicalRemoteHomePath = canonicalRemoteHomePath;
   }
 
   register(): vscode.Disposable {
@@ -263,6 +267,9 @@ export class WorkspaceResourceController
         ? request.params.threadId
         : undefined;
     const resolved = this.#resolve(rootId, path, undefined, threadId);
+    if (resolved.root.target === "remote" && resolved.root.role === "secondary") {
+      await this.#assertStillAuthorized(resolved);
+    }
     if (request.operation === "registerWorkspaceResource") {
       this.#rememberResource(resolved);
       return this.#result("registered", resolved);
@@ -399,7 +406,9 @@ export class WorkspaceResourceController
     } catch (error) {
       if (
         error instanceof BridgeError &&
-        (error.code === "COMMAND_DENIED" || error.code === "OUTPUT_TRUNCATED")
+        (error.code === "COMMAND_DENIED" ||
+          error.code === "OUTPUT_TRUNCATED" ||
+          error.code === "PATH_OUTSIDE_ROOT")
       ) {
         return null;
       }
@@ -711,7 +720,10 @@ export class WorkspaceResourceController
 
     let actualUri: vscode.Uri;
     if (root.target === "remote") {
-      if (root.role !== "primary" || root.path !== config.workspaceRoot) {
+      if (
+        (root.role === "primary" && root.path !== config.workspaceRoot) ||
+        (root.role === "secondary" && root.id !== REMOTE_HOME_ACCESS_ROOT_ID)
+      ) {
         throw new BridgeError("INVALID_CONFIG", "Remote workspace resource root is invalid");
       }
       const remote = detectRemoteWorkspace();
@@ -724,26 +736,31 @@ export class WorkspaceResourceController
           "Workspace resource does not match the open Remote SSH workspace",
         );
       }
-      actualUri = vscode.Uri.joinPath(remote.workspaceUri, ...relativePath.split("/"));
+      actualUri = vscode.Uri.joinPath(
+        remote.workspaceUri.with({ path: root.path }),
+        ...relativePath.split("/"),
+      );
     } else {
-      const authorized = threadId
-        ? this.#resolveAuthorizedRoot(threadId, root.id)
-        : undefined;
-      if (
-        root.role !== "conversation" ||
-        !authorized ||
-        authorized.target !== "local" ||
-        authorized.path !== root.path ||
-        authorized.role !== "conversation" ||
-        authorized.threadId !== threadId
-      ) {
+      const authorized = this.#resolveAuthorizedRoot(threadId ?? "", root.id);
+      const secondaryAuthorized =
+        root.role === "secondary" &&
+        authorized?.role === "secondary" &&
+        authorized.target === "local" &&
+        authorized.path === root.path;
+      const conversationAuthorized =
+        root.role === "conversation" &&
+        authorized?.role === "conversation" &&
+        authorized.target === "local" &&
+        authorized.path === root.path &&
+        authorized.threadId === threadId;
+      if (!secondaryAuthorized && !conversationAuthorized) {
         throw new BridgeError(
           "COMMAND_DENIED",
           "The local workspace resource authorization is no longer valid",
         );
       }
       actualUri =
-        root.kind === "file"
+        root.role === "conversation" && root.kind === "file"
           ? vscode.Uri.file(root.path)
           : vscode.Uri.joinPath(vscode.Uri.file(root.path), ...relativePath.split("/"));
     }
@@ -770,7 +787,7 @@ export class WorkspaceResourceController
         (root) =>
           root.id === resolved.root.id &&
           root.target === "remote" &&
-          root.role === "primary" &&
+          root.role === resolved.root.role &&
           root.path === resolved.root.path,
       );
       const remote = detectRemoteWorkspace();
@@ -784,23 +801,38 @@ export class WorkspaceResourceController
           "Workspace resource no longer matches the active Remote SSH workspace",
         );
       }
+      if (resolved.root.role === "secondary") {
+        if (!this.#canonicalRemoteHomePath) {
+          throw new BridgeError("COMMAND_DENIED", "Remote home validation is unavailable");
+        }
+        const canonicalPath = await this.#canonicalRemoteHomePath(resolved.actualUri.path);
+        if (canonicalPath !== resolved.actualUri.path) {
+          throw new BridgeError(
+            "PATH_OUTSIDE_ROOT",
+            "Remote home resource no longer matches its canonical path",
+          );
+        }
+      }
       return;
     }
-    const authorized = resolved.threadId
-      ? this.#resolveAuthorizedRoot(resolved.threadId, resolved.root.id)
-      : undefined;
-    if (
-      resolved.root.role !== "conversation" ||
-      !authorized ||
-      authorized.role !== "conversation" ||
-      authorized.threadId !== resolved.threadId ||
-      authorized.path !== resolved.root.path ||
-      authorized.kind !== resolved.root.kind ||
-      !resolved.localPath
-    ) {
+    const authorized = this.#resolveAuthorizedRoot(
+      resolved.threadId ?? "",
+      resolved.root.id,
+    );
+    const secondaryAuthorized =
+      resolved.root.role === "secondary" &&
+      authorized?.role === "secondary" &&
+      authorized.path === resolved.root.path;
+    const conversationAuthorized =
+      resolved.root.role === "conversation" &&
+      authorized?.role === "conversation" &&
+      authorized.threadId === resolved.threadId &&
+      authorized.path === resolved.root.path &&
+      authorized.kind === resolved.root.kind;
+    if ((!secondaryAuthorized && !conversationAuthorized) || !resolved.localPath) {
       throw new BridgeError(
         "COMMAND_DENIED",
-        "The conversation resource authorization is no longer valid",
+        "The local workspace resource authorization is no longer valid",
       );
     }
     try {
@@ -811,7 +843,7 @@ export class WorkspaceResourceController
       if (canonicalPath !== resolved.localPath || !metadata.isFile()) {
         throw new BridgeError(
           "COMMAND_DENIED",
-          "The conversation resource no longer resolves to the registered file",
+          "The local workspace resource no longer resolves to the registered file",
         );
       }
     } catch (error) {
@@ -820,7 +852,7 @@ export class WorkspaceResourceController
       }
       throw new BridgeError(
         "COMMAND_DENIED",
-        "The conversation resource is no longer available",
+        "The local workspace resource is no longer available",
         undefined,
         { cause: error },
       );

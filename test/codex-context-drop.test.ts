@@ -206,6 +206,48 @@ describe("Codex Workbench drop", () => {
     expect(desktop.resources[0]?.scheme).toBe("file");
   });
 
+  it("maps a sibling workspace Explorer path under the remote user's home", () => {
+    mock.remoteName = "ssh-remote";
+    mock.workspaceFolders = [{
+      index: 0,
+      name: "project",
+      uri: vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/project"),
+    }];
+    const parsed = parseWorkbenchDropPayload(
+      {
+        schemaVersion: 1,
+        codeFiles: '["/home/unitree/other/src/main.py"]',
+        internalUriList: "vscode-remote://ssh-remote%2Bdev/home/unitree/other/src/main.py",
+      },
+      undefined,
+      "/home/unitree",
+    );
+
+    expect(parsed.resources.map((resource) => resource.toString())).toEqual([
+      "vscode-remote://ssh-remote+dev/home/unitree/other/src/main.py",
+    ]);
+
+    const unverified = parseWorkbenchDropPayload(
+      { schemaVersion: 1, codeFiles: '["/home/unitree/other/src/main.py"]' },
+      undefined,
+      "/home/unitree",
+    );
+    expect(unverified.resources).toEqual([]);
+
+    const foreign = parseWorkbenchDropPayload(
+      {
+        schemaVersion: 1,
+        codeFiles: '["/home/unitree/other/src/main.py"]',
+        internalUriList: "vscode-remote://ssh-remote%2Bforeign/home/unitree/other/src/main.py",
+      },
+      undefined,
+      "/home/unitree",
+    );
+    expect(foreign.resources.map((resource) => resource.authority)).toEqual([
+      "ssh-remote+foreign",
+    ]);
+  });
+
   it("adds every local file and folder as a cursor-positioned inline mention", async () => {
     const logs: string[] = [];
     const result = await attachDroppedResourcesToCodex(
@@ -305,6 +347,53 @@ describe("Codex Workbench drop", () => {
       remoteCount: 1,
     });
     expect(result.firstFailure).toContain("outside the active Remote SSH workspace");
+  });
+
+  it("attaches a sibling workspace file only on the same host and inside remote home", async () => {
+    mock.remoteName = "ssh-remote";
+    mock.workspaceFolders = [{
+      index: 0,
+      name: "project",
+      uri: vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/project"),
+    }];
+    const result = await attachDroppedResourcesToCodex([
+      vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/other/file.py"),
+      vscode.Uri.parse("vscode-remote://ssh-remote%2Bother/home/unitree/other/file.py"),
+      vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/other/file.py"),
+    ], { remoteHomePath: "/home/unitree" });
+
+    expect(result).toMatchObject({ attachedCount: 1, failedCount: 2, remoteCount: 1 });
+    expect(mock.stat).toHaveBeenCalledOnce();
+    expect(mock.executeCommand).toHaveBeenCalledOnce();
+    expect((mock.executeCommand.mock.calls[0]?.[1] as vscodeTypes.Uri).fsPath).toBe(
+      `/${CODEX_REMOTE_INLINE_MENTION_PATH_PREFIX}${encodeURIComponent("/home/unitree/other/file.py")}${CODEX_INLINE_MENTION_PATH_MARKER}`,
+    );
+  });
+
+  it("attaches a sibling directory in one window and a file in the reverse window", async () => {
+    mock.remoteName = "ssh-remote";
+    mock.workspaceFolders = [{
+      index: 0,
+      name: "first",
+      uri: vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/first"),
+    }];
+    const first = await attachDroppedResourcesToCodex([
+      vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/second/folder"),
+    ], { remoteHomePath: "/home/unitree" });
+    expect(first).toMatchObject({ attachedCount: 1, directoryCount: 1, remoteCount: 1 });
+    expect((mock.executeCommand.mock.calls[0]?.[1] as vscodeTypes.Uri).fsPath).toBe(
+      `/${CODEX_REMOTE_INLINE_MENTION_PATH_PREFIX}${encodeURIComponent("/home/unitree/second/folder")}${CODEX_INLINE_MENTION_PATH_MARKER}/`,
+    );
+
+    mock.workspaceFolders = [{
+      index: 0,
+      name: "second",
+      uri: vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/second"),
+    }];
+    const reverse = await attachDroppedResourcesToCodex([
+      vscode.Uri.parse("vscode-remote://ssh-remote%2Bdev/home/unitree/first/main.py"),
+    ], { remoteHomePath: "/home/unitree" });
+    expect(reverse).toMatchObject({ attachedCount: 1, fileCount: 1, remoteCount: 1 });
   });
 
   it("uses an inline mention for a remote workspace URI by default", async () => {

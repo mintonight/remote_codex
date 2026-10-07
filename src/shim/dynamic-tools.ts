@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { defaultRemotePrimaryRoot, parseBridgeConfig, REMOTE_HOME_ACCESS_ROOT_ID } from "../core/config.js";
 import { asBridgeError, BridgeError } from "../core/errors.js";
 import type { AuditLog } from "../core/audit-log.js";
 import type { OpenSshExecutor } from "../core/ssh-executor.js";
+import { VsCodeRemoteExecutor } from "../core/vscode-remote-executor.js";
 import type {
   BridgeClientIdentity,
   BridgeConfig,
@@ -96,7 +98,7 @@ const REMOTE_ROOT_INPUT_PROPERTIES = {
     minLength: 1,
     maxLength: 64,
     pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-    description: "Configured remote primary root ID.",
+    description: "Configured remote root ID. Background tasks require the primary root.",
   },
 } as const;
 
@@ -551,6 +553,7 @@ export class DynamicToolRouter {
   readonly #config: BridgeConfig;
   readonly #controllerWorkspace: ControllerWorkspaceClient | null;
   readonly #executor: OpenSshExecutor;
+  #homeExecutor: VsCodeRemoteExecutor | null = null;
 
   constructor(config: BridgeConfig, executor: OpenSshExecutor, audit: AuditLog) {
     this.#config = config;
@@ -559,6 +562,11 @@ export class DynamicToolRouter {
       ? executor
       : null;
     this.#audit = audit;
+  }
+
+  dispose(): void {
+    this.#homeExecutor?.close();
+    this.#homeExecutor = null;
   }
 
   async handle(
@@ -823,9 +831,8 @@ export class DynamicToolRouter {
       );
     }
     if (tool === "remote_exec") {
-      this.#assertRemotePrimaryRoot(root);
       const request = parseRemoteExecArguments(args);
-      return await this.#executor.execute(request.argv, {
+      return await this.#remoteExecutor(root).execute(request.argv, {
         cwd: request.cwd,
         env: request.env,
         idempotencyKey: observer.idempotencyKey,
@@ -1095,7 +1102,10 @@ export class DynamicToolRouter {
         ? this.#config.roots.find(
             (candidate) => candidate.id === rootId && candidate.target === "remote",
           )
-        : conversationResources.find(
+        : this.#config.roots.find(
+            (candidate) => candidate.id === rootId && candidate.target === "local",
+          ) ??
+          conversationResources.find(
             (candidate) => candidate.id === rootId && candidate.target === "local",
           );
     if (!root) {
@@ -1112,13 +1122,12 @@ export class DynamicToolRouter {
     threadId: string | undefined,
   ): WorkspaceExecutor {
     if (root.target === "remote") {
-      this.#assertRemotePrimaryRoot(root);
-      return this.#executor;
+      return this.#remoteExecutor(root);
     }
-    if (root.role !== "conversation") {
+    if (root.role !== "secondary" && root.role !== "conversation") {
       throw new BridgeError(
         "COMMAND_DENIED",
-        "Local workspace tools can access only a resource shared with the active conversation",
+        "Local workspace tools require an authorized local root or conversation resource",
         { rootId: root.id },
       );
     }
@@ -1132,7 +1141,7 @@ export class DynamicToolRouter {
     if (!threadId) {
       throw new BridgeError(
         "PROTOCOL_MISMATCH",
-        "Local workspace access requires the active conversation thread ID",
+        "Local workspace access requires an active conversation thread ID",
         { rootId: root.id },
       );
     }
@@ -1141,6 +1150,29 @@ export class DynamicToolRouter {
       this.#controllerWorkspace,
       threadId,
     );
+  }
+
+  #remoteExecutor(root: WorkspaceToolRoot): OpenSshExecutor {
+    if (this.#isRemotePrimaryRoot(root)) {
+      return this.#executor;
+    }
+    if (
+      root.id !== REMOTE_HOME_ACCESS_ROOT_ID ||
+      root.target !== "remote" ||
+      root.role !== "secondary" ||
+      this.#config.connectionMode !== "vscode-remote"
+    ) {
+      throw new BridgeError("COMMAND_DENIED", "The remote workspace root is not authorized");
+    }
+    this.#homeExecutor ??= new VsCodeRemoteExecutor(
+      parseBridgeConfig({
+        ...this.#config,
+        roots: [defaultRemotePrimaryRoot(root.path)],
+        workspaceRoot: root.path,
+      }),
+      this.#config.workspaceRoot,
+    );
+    return this.#homeExecutor;
   }
 
   #assertRemotePrimaryRoot(root: WorkspaceToolRoot): void {

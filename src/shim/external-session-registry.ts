@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, resolve, win32 } from "node:path";
 import { bridgeExternalCliDir } from "../core/locations.js";
 import {
   inspectProcessIdentities,
+  processIdentitiesMatch,
   processExecutablePathsEqual,
   type ProcessIdentity,
   type ProcessIdentityInspector,
@@ -20,14 +21,14 @@ const LEGACY_EXECUTABLE_NAMES = new Set([
   "node.exe",
 ]);
 
-function parseDescriptor(
+export function parseDescriptor(
   value: unknown,
   directory: string,
   hostPlatform: NodeJS.Platform,
 ): ExternalCliSessionDescriptor {
   if (
     !isRecord(value) ||
-    (value.version !== 1 && value.version !== 2) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3) ||
     typeof value.endpoint !== "string" ||
     !/^ws:\/\/127\.0\.0\.1:\d+$/.test(value.endpoint) ||
     typeof value.host !== "string" ||
@@ -44,12 +45,29 @@ function parseDescriptor(
     typeof value.workspaceRoot !== "string" ||
     value.workspaceRoot.length === 0 ||
     ("threadId" in value && typeof value.threadId !== "string") ||
+    ("codexHome" in value && typeof value.codexHome !== "string") ||
+    ("serviceScope" in value && value.serviceScope !== "user") ||
+    ("executableFileId" in value && typeof value.executableFileId !== "string") ||
+    ("serviceKey" in value && (typeof value.serviceKey !== "string" || !/^[a-f0-9]{64}$/.test(value.serviceKey))) ||
+    ("lifecycle" in value && !["starting", "ready", "stopping", "detached", "failed"].includes(String(value.lifecycle))) ||
     ("executablePath" in value &&
       (typeof value.executablePath !== "string" ||
         !(hostPlatform === "win32"
           ? win32.isAbsolute(value.executablePath)
           : isAbsolute(value.executablePath)))) ||
-    (value.version === 2 && typeof value.executablePath !== "string")
+    ((value.version === 2 || value.version === 3) &&
+      typeof value.executablePath !== "string") ||
+    (value.version === 3 &&
+      (!isRecord(value.appServer) ||
+        typeof value.appServer.executablePath !== "string" ||
+        !(hostPlatform === "win32"
+          ? win32.isAbsolute(value.appServer.executablePath)
+          : isAbsolute(value.appServer.executablePath)) ||
+        typeof value.appServer.pid !== "number" ||
+        !Number.isSafeInteger(value.appServer.pid) ||
+        value.appServer.pid <= 0 ||
+        typeof value.appServer.startedAtMs !== "number" ||
+        !Number.isFinite(value.appServer.startedAtMs)))
   ) {
     throw new TypeError("Invalid external CLI session descriptor");
   }
@@ -70,7 +88,7 @@ function descriptorMatchesProcess(
   identity: ProcessIdentity,
   hostPlatform: NodeJS.Platform,
 ): boolean {
-  if (descriptor.version === 2) {
+  if (descriptor.version === 2 || descriptor.version === 3) {
     if (
       Math.abs(descriptor.startedAtMs - identity.startedAtMs) >
       CURRENT_STARTED_AT_TOLERANCE_MS
@@ -87,6 +105,9 @@ function descriptorMatchesProcess(
     }
   }
   if (descriptor.executablePath) {
+    if (descriptor.executableFileId && hostPlatform === "linux") {
+      return processIdentitiesMatch({ ...descriptor, executablePath: descriptor.executablePath }, identity, hostPlatform);
+    }
     return processExecutablePathsEqual(
       descriptor.executablePath,
       identity.executablePath,
@@ -179,12 +200,12 @@ export async function discoverExternalCliSessions(
 
   let identities: Map<number, ProcessIdentity>;
   try {
-    identities = await inspectProcesses(candidates.map(({ descriptor }) => descriptor.pid));
+    identities = await inspectProcesses(candidates.flatMap(({ descriptor }) =>
+      descriptor.appServer ? [descriptor.pid, descriptor.appServer.pid] : [descriptor.pid],
+    ));
   } catch {
-    return candidates
-      .map(({ descriptor }) => descriptor)
-      .filter(({ pid }) => processIsAlive(pid))
-      .sort((left, right) => right.startedAtMs - left.startedAtMs);
+    // An unverifiable process must not become a live conversation endpoint.
+    return [];
   }
 
   const sessions: ExternalCliSessionDescriptor[] = [];
@@ -194,13 +215,23 @@ export async function discoverExternalCliSessions(
       identity &&
       descriptorMatchesProcess(candidate.descriptor, identity, hostPlatform)
     ) {
-      sessions.push(candidate.descriptor);
+      const descriptor = candidate.descriptor;
+      const appServer = descriptor.appServer;
+      const actual = appServer ? identities.get(appServer.pid) : undefined;
+      if (
+        (!descriptor.lifecycle || descriptor.lifecycle === "ready") &&
+        (!appServer || processIdentitiesMatch(appServer, actual, hostPlatform, CURRENT_STARTED_AT_TOLERANCE_MS))
+      ) sessions.push(descriptor);
       continue;
     }
     if (!identity && processIsAlive(candidate.descriptor.pid)) {
       continue;
     }
-    await removeDescriptorIfUnchanged(candidate.path, candidate.raw).catch(() => undefined);
+    // v2/v3 records are also the recovery journal for an orphaned app-server.
+    // Only the identity-verifying reaper may remove them after the child exits.
+    if (candidate.descriptor.version === 1) {
+      await removeDescriptorIfUnchanged(candidate.path, candidate.raw).catch(() => undefined);
+    }
   }
   return sessions.sort((left, right) => right.startedAtMs - left.startedAtMs);
 }

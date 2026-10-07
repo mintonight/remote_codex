@@ -88,7 +88,7 @@ describe("external Bridge session registry", () => {
     ).resolves.toEqual([value]);
   });
 
-  it("removes a descriptor when the PID belongs to a different process", async () => {
+  it("retains recovery evidence when the Shim PID belongs to a different process", async () => {
     const directory = await createRegistry();
     const value = descriptor(directory, { pid: 42_424 });
     const descriptorPath = await writeDescriptor(directory, value);
@@ -106,7 +106,7 @@ describe("external Bridge session registry", () => {
         "win32",
       ),
     ).resolves.toEqual([]);
-    await expect(access(descriptorPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(descriptorPath)).resolves.toBeUndefined();
     await expect(readFile(value.tokenPath, "utf8")).resolves.toBe(
       "private-session-token",
     );
@@ -130,10 +130,10 @@ describe("external Bridge session registry", () => {
         "win32",
       ),
     ).resolves.toEqual([]);
-    await expect(access(descriptorPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(descriptorPath)).resolves.toBeUndefined();
   });
 
-  it("removes a descriptor after its process exits", async () => {
+  it("retains a dead Shim journal for app-server cleanup", async () => {
     const directory = await createRegistry();
     const value = descriptor(directory, { pid: 2_147_483_647 });
     const descriptorPath = await writeDescriptor(directory, value);
@@ -141,7 +141,7 @@ describe("external Bridge session registry", () => {
     await expect(
       discoverExternalCliSessions(directory, inspector([]), "win32"),
     ).resolves.toEqual([]);
-    await expect(access(descriptorPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(descriptorPath)).resolves.toBeUndefined();
   });
 
   it("keeps but omits a live descriptor when process inspection has no identity", async () => {
@@ -155,7 +155,7 @@ describe("external Bridge session registry", () => {
     await expect(access(descriptorPath)).resolves.toBeUndefined();
   });
 
-  it("falls back to liveness when process inspection is unavailable", async () => {
+  it("does not advertise unverifiable processes when inspection is unavailable", async () => {
     const directory = await createRegistry();
     const value = descriptor(directory, { pid: process.pid });
     await writeDescriptor(directory, value);
@@ -165,7 +165,7 @@ describe("external Bridge session registry", () => {
 
     await expect(
       discoverExternalCliSessions(directory, unavailable, "win32"),
-    ).resolves.toEqual([value]);
+    ).resolves.toEqual([]);
   });
 
   it("does not delete a descriptor replaced during process inspection", async () => {

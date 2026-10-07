@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseBridgeConfig } from "../src/core/config.js";
@@ -17,6 +17,10 @@ describe.skipIf(process.platform === "win32")("LocalProcessExecutor", () => {
     );
     process.env.CODEX_TEST_SECRET = "must-not-leak";
     try {
+      await expect(executor.probe()).resolves.toMatchObject({
+        homeDirectory: await realpath(homedir()),
+        workspaceRoot: workspace,
+      });
       await expect(
         executor.execute([
           "sh",

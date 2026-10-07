@@ -1,4 +1,6 @@
 import type * as vscode from "vscode";
+import { homedir } from "node:os";
+import { parse } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mock = vi.hoisted(() => ({
@@ -51,7 +53,7 @@ const mock = vi.hoisted(() => ({
     source: "system-file-manager",
   },
   saveConfig: vi.fn(async () => undefined),
-  showOpenDialog: vi.fn(async () => undefined),
+  showOpenDialog: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => undefined),
   settingsConfigure: vi.fn(async () => true),
   settingsHasManaged: vi.fn(() => false),
   settingsRepair: vi.fn(async () => ({ changed: false, reloadRequired: false })),
@@ -238,6 +240,7 @@ vi.mock("../src/extension/codex-inline-mention-compatibility.js", () => ({
 import { BridgeController } from "../src/extension/controller.js";
 
 const globalStateValues = new Map<string, unknown>();
+const workspaceStateValues = new Map<string, unknown>();
 
 function context(): vscode.ExtensionContext {
   return {
@@ -255,6 +258,16 @@ function context(): vscode.ExtensionContext {
         }
       },
     },
+    workspaceState: {
+      get: (key: string) => workspaceStateValues.get(key),
+      update: async (key: string, value: unknown) => {
+        if (value === undefined) {
+          workspaceStateValues.delete(key);
+        } else {
+          workspaceStateValues.set(key, value);
+        }
+      },
+    },
   } as unknown as vscode.ExtensionContext;
 }
 
@@ -266,6 +279,7 @@ describe("BridgeController restored-state configuration", () => {
     });
     mock.registeredCommands.clear();
     globalStateValues.clear();
+    workspaceStateValues.clear();
     mock.settingsConfigure.mockResolvedValue(true);
     mock.settingsHasManaged.mockReturnValue(false);
     mock.settingsRepair.mockResolvedValue({ changed: false, reloadRequired: false });
@@ -308,6 +322,20 @@ describe("BridgeController restored-state configuration", () => {
     await controller.configure();
 
     expect(mock.saveConfig).toHaveBeenCalledTimes(1);
+    expect(mock.saveConfig).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        localExecution: "allow",
+        roots: expect.arrayContaining([
+          expect.objectContaining({
+            id: "local-full-access",
+            path: parse(homedir()).root,
+            role: "secondary",
+            target: "local",
+          }),
+        ]),
+      }),
+    );
     expect(mock.settingsConfigure).toHaveBeenCalledWith("/managed/codex-bridge-shim.cjs");
     expect(mock.settingsUpdate).toHaveBeenCalledWith("autoInitialize", true, 1);
     expect(mock.executeCommand).toHaveBeenCalledWith("workbench.action.reloadWindow");
@@ -365,7 +393,7 @@ describe("BridgeController restored-state configuration", () => {
     expect(mock.officialExtension).not.toHaveBeenCalled();
   });
 
-  it("registers context and drop commands without global local-root authorization", () => {
+  it("registers context and drop commands without per-path local authorization", () => {
     const controller = new BridgeController(context());
 
     controller.registerCommands();
@@ -406,14 +434,14 @@ describe("BridgeController restored-state configuration", () => {
       }),
     );
     expect(mock.showInformationMessage).toHaveBeenCalledWith(
-      expect.stringContaining("Reloading VS Code automatically"),
+      expect.stringContaining("Reload VS Code manually"),
     );
     expect(mock.localDropAutomaticAuthorizationSet).toHaveBeenCalledWith(true);
-    expect(mock.executeCommand).toHaveBeenCalledWith("workbench.action.reloadWindow");
+    expect(mock.executeCommand).not.toHaveBeenCalledWith("workbench.action.reloadWindow");
   });
 
   it.skipIf(process.platform === "win32")(
-    "offers compatible native drop access once and reloads after approval",
+    "offers compatible native drop access once and leaves reload to the user",
     async () => {
     mock.warningResponse = "Enable";
     mock.workbenchNeedsElevation.mockResolvedValue(true);
@@ -432,8 +460,32 @@ describe("BridgeController restored-state configuration", () => {
     expect(mock.workbenchEnable).toHaveBeenCalledWith(
       expect.objectContaining({ replaceTarget: mock.workbenchPkexec }),
     );
-    expect(mock.executeCommand).toHaveBeenCalledTimes(1);
-    expect(mock.executeCommand).toHaveBeenCalledWith("workbench.action.reloadWindow");
+    expect(mock.executeCommand).not.toHaveBeenCalled();
+  });
+
+  it("retries failed native drop installation instead of remembering it as a decline", async () => {
+    mock.warningResponse = "Enable";
+    mock.officialExtension.mockReturnValue({ extensionPath: "/extensions/openai.chatgpt", packageJSON: { version: "1.0.0" } });
+    mock.workbenchEnable.mockRejectedValueOnce(new Error("authorization dismissed"));
+    const controller = new BridgeController(context());
+    await controller.offerWorkbenchDropOnboarding();
+    await controller.offerWorkbenchDropOnboarding();
+    await controller.offerWorkbenchDropOnboarding();
+    expect(mock.workbenchEnable).toHaveBeenCalledTimes(2);
+    expect(mock.workbenchInspect).toHaveBeenCalledTimes(2);
+    expect(mock.showWarningMessage).toHaveBeenCalledTimes(2);
+    expect(mock.executeCommand).not.toHaveBeenCalledWith("workbench.action.reloadWindow");
+  });
+
+  it("offers an update when a verified managed patch needs a newer capability", async () => {
+    mock.warningResponse = "Enable";
+    mock.officialExtension.mockReturnValue({ extensionPath: "/extensions/openai.chatgpt", packageJSON: { version: "1.0.0" } });
+    mock.workbenchInspect.mockResolvedValue({ status: "update-available", changed: false, targetPath: "/opt/code/workbench.js" });
+    mock.inlineMentionInspect.mockResolvedValue({ status: "update-available", changed: false, extensionVersion: "1.0.0", targetPath: "/extensions/openai.chatgpt/webview/assets/app.js" });
+    const controller = new BridgeController(context());
+    await controller.offerWorkbenchDropOnboarding();
+    expect(mock.workbenchEnable).toHaveBeenCalledOnce();
+    expect(mock.inlineMentionEnable).toHaveBeenCalledOnce();
   });
 
   it("rolls back automatic local path consent when native drop enable fails", async () => {

@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,15 @@ const SOURCE = [
 const execFileAsync = promisify(execFile);
 
 describe("official Codex inline file mention patch", () => {
+  it("accepts the six-parameter composer insertion method used by newer Codex builds", () => {
+    const source = SOURCE.replace(
+      "insertMentionNodeInRange(e,t,n,r,i=!1)",
+      "insertMentionNodeInRange(e,t,n,r,i=!1,a=!1)",
+    );
+
+    expect(inspectCodexInlineMentionSource(source).status).toBe("patchable");
+  });
+
   it("routes marked add-context-file events into an inline mention at the current selection", () => {
     const inspected = inspectCodexInlineMentionSource(SOURCE);
     expect(inspected.status).toBe("patchable");
@@ -163,7 +173,7 @@ describe("official Codex inline file mention patch", () => {
     ]);
   });
 
-  it("forwards a direct Webview ingress and fallback drop to the Workbench", () => {
+  it("requires a live matching handshake before consuming Webview drag/drop", () => {
     const runtimeSource = [
       "let handler=null",
       "class Composer{insertAtMention(e,t){}insertMentionNodeInRange(e,t,n,r,i=!1){}}",
@@ -189,6 +199,10 @@ describe("official Codex inline file mention patch", () => {
     );
     const listeners = new Map<string, (event: Record<string, unknown>) => void>();
     const postMessage = vi.fn();
+    const host = { postMessage };
+    const clock = vi.spyOn(Date, "now");
+    const now = Date.now();
+    clock.mockReturnValue(now);
     try {
       Object.defineProperties(runtime, {
         __codexRemoteBridgeWebviewDropV1: {
@@ -209,11 +223,22 @@ describe("official Codex inline file mention patch", () => {
         },
         top: {
           configurable: true,
-          value: { postMessage },
+          value: host,
           writable: true,
         },
       });
       new Function(inspected.patchedSource)();
+
+      const nonce = postMessage.mock.calls[0]?.[0].nonce;
+      expect(postMessage.mock.calls[0]?.[0]).toMatchObject({ phase: "probe", channel: CODEX_WEBVIEW_DROP_CHANNEL });
+      const dropped = { dataTransfer: { files: [], types: ["text/uri-list"], getData: () => "file:///work/file.txt" }, preventDefault: vi.fn(), stopPropagation: vi.fn(), stopImmediatePropagation: vi.fn() };
+      listeners.get("drop")?.(dropped);
+      expect(dropped.preventDefault).not.toHaveBeenCalled();
+      listeners.get("message")?.({ source: {}, data: { channel: CODEX_WEBVIEW_DROP_CHANNEL, phase: "ready", nonce } });
+      listeners.get("message")?.({ source: host, data: { channel: CODEX_WEBVIEW_DROP_CHANNEL, phase: "ready", nonce: "wrong" } });
+      listeners.get("drop")?.(dropped);
+      expect(dropped.preventDefault).not.toHaveBeenCalled();
+      listeners.get("message")?.({ source: host, data: { channel: CODEX_WEBVIEW_DROP_CHANNEL, phase: "ready", nonce } });
 
       const preventDefault = vi.fn();
       listeners.get("dragenter")?.({
@@ -250,7 +275,15 @@ describe("official Codex inline file mention patch", () => {
         },
         "*",
       );
+      clock.mockReturnValue(now + 2000);
+      listeners.get("drop")?.(dropped);
+      expect(dropped.preventDefault).not.toHaveBeenCalled();
+      // A late reply to the previous probe cannot restore the lease.
+      listeners.get("message")?.({ source: host, data: { channel: CODEX_WEBVIEW_DROP_CHANNEL, phase: "ready", nonce } });
+      listeners.get("drop")?.(dropped);
+      expect(dropped.preventDefault).not.toHaveBeenCalled();
     } finally {
+      clock.mockRestore();
       for (const name of propertyNames) {
         const descriptor = descriptors.get(name);
         if (descriptor) {
@@ -303,15 +336,15 @@ describe("official Codex inline file mention patch", () => {
     });
   });
 
-  const installedAsset = join(
-    process.env.HOME ?? "",
-    ".vscode",
-    "extensions",
-    "openai.chatgpt-26.803.41515-linux-x64",
-    "webview",
-    "assets",
-    "app-initial-Ge3MuNyY.js",
-  );
+  const installedAsset = (() => {
+    try {
+      const extension = process.env.CODEX_BRIDGE_TEST_CODEX_EXTENSION_PATH ??
+        execFileSync("code", ["--locate-extension", "openai.chatgpt"], { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      const assets = join(extension, "webview", "assets");
+      return readdirSync(assets).filter((name) => /^app-initial.*\.js$/.test(name))
+        .map((name) => join(assets, name)).find((path) => inspectCodexInlineMentionSource(readFileSync(path, "utf8")).status !== "unsupported");
+    } catch { return undefined; }
+  })();
   const managedOriginalAsset = join(
     process.env.HOME ?? "",
     ".local",
@@ -320,13 +353,17 @@ describe("official Codex inline file mention patch", () => {
     "codex-inline-mention-compatibility",
     "inline-file-mention.original.js",
   );
-  it.skipIf(!existsSync(installedAsset))(
+  it.skipIf(!installedAsset)(
     "recognizes and preserves JavaScript syntax for the installed official asset",
     async () => {
-      const source = await readFile(
-        existsSync(managedOriginalAsset) ? managedOriginalAsset : installedAsset,
-        "utf8",
-      );
+      let source = await readFile(installedAsset!, "utf8");
+      if (existsSync(managedOriginalAsset)) {
+        const metadata = JSON.parse(await readFile(join(managedOriginalAsset, "..", "inline-file-mention.json"), "utf8"));
+        if (metadata.targetPath === installedAsset) {
+          source = await readFile(managedOriginalAsset, "utf8");
+          expect(createHash("sha256").update(source).digest("hex")).toBe(metadata.originalSha256);
+        }
+      }
       const inspected = inspectCodexInlineMentionSource(source);
       expect(inspected.status).toMatch(/patchable|compatible/);
       if (inspected.status !== "patchable") {

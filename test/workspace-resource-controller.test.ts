@@ -66,6 +66,14 @@ vi.mock("vscode", () => {
       return this.path;
     }
 
+    with(change: { path?: string }): Uri {
+      const parsed = new URL(this.value);
+      if (change.path !== undefined) {
+        parsed.pathname = change.path;
+      }
+      return new Uri(parsed.toString());
+    }
+
     toString(): string {
       return this.value;
     }
@@ -141,6 +149,14 @@ const remoteRoot: WorkspaceRootConfig = {
   target: "remote",
 };
 
+const remoteHomeRoot: WorkspaceRootConfig = {
+  displayName: "Remote user home",
+  id: "remote-home-access",
+  path: "/home/zkbot",
+  role: "secondary",
+  target: "remote",
+};
+
 const localResource: ConversationResourceConfig = {
   displayName: "notes",
   id: "context-notes",
@@ -151,13 +167,21 @@ const localResource: ConversationResourceConfig = {
   threadId: "thread-1",
 };
 
+const writableLocalRoot: WorkspaceRootConfig = {
+  displayName: "downloads",
+  id: "local-downloads",
+  path: "/tmp/bridge-downloads",
+  role: "secondary",
+  target: "local",
+};
+
 function config(roots: WorkspaceRootConfig[] = [remoteRoot]): BridgeConfig {
   return {
     commandTimeoutMs: 120_000,
     connectTimeoutSeconds: 10,
     connectionMode: "vscode-remote",
     host: "test_40",
-    localExecution: "deny",
+    localExecution: "allow",
     maxOutputBytes: 10 * 1024 * 1024,
     maxParallelReads: 8,
     maxParallelWrites: 1,
@@ -206,6 +230,37 @@ describe("WorkspaceResourceController", () => {
         "vscode-remote://ssh-remote%2Btest_40/home/zkbot/work/train/zklab/Zklab",
       ),
     };
+  });
+
+  it("opens a sibling workspace through the same Remote SSH authority and home root", async () => {
+    const canonicalRemoteHomePath = vi.fn(async (path: string) => path);
+    const controller = new WorkspaceResourceController(
+      () => config([remoteRoot, remoteHomeRoot]),
+      () => undefined,
+      canonicalRemoteHomePath,
+    );
+    const result = (await controller.execute(
+      request("openWorkspaceResource", remoteHomeRoot.id, {
+        path: "/home/zkbot/work/other/file.txt",
+      }),
+    )) as Record<string, unknown>;
+
+    expect(mock.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        value: "vscode-remote://ssh-remote%2Btest_40/home/zkbot/work/other/file.txt",
+      }),
+    );
+    expect(result.resourceUri).toContain("/remote-home-access/work/other/file.txt");
+    expect(canonicalRemoteHomePath).toHaveBeenCalledWith("/home/zkbot/work/other/file.txt");
+    await expect(controller.execute(
+      request("openWorkspaceResource", remoteHomeRoot.id, {
+        path: "/home/other/file.txt",
+      }),
+    )).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
+    canonicalRemoteHomePath.mockResolvedValueOnce("/etc/passwd");
+    await expect(controller.provideTextDocumentContent(
+      vscode.Uri.parse(result.resourceUri as string),
+    )).rejects.toMatchObject({ code: "PATH_OUTSIDE_ROOT" });
   });
 
   it("reuses the exact open Remote SSH workspace URI for an editor jump", async () => {
@@ -409,6 +464,37 @@ describe("WorkspaceResourceController", () => {
     ).rejects.toMatchObject({ code: "COMMAND_DENIED" });
   });
 
+  it("opens a configured writable local-root resource and observes revocation", async () => {
+    let authorized = true;
+    const controller = new WorkspaceResourceController(
+      () => config([remoteRoot, writableLocalRoot]),
+      (_threadId, rootId) =>
+        authorized && rootId === writableLocalRoot.id
+          ? writableLocalRoot
+          : undefined,
+    );
+
+    await controller.execute(
+      request("openWorkspaceResource", writableLocalRoot.id, {
+        path: `${writableLocalRoot.path}/result.txt`,
+        threadId: "thread-1",
+      }),
+    );
+    expect(mock.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ value: "file:///tmp/bridge-downloads/result.txt" }),
+    );
+
+    authorized = false;
+    await expect(
+      controller.execute(
+        request("openWorkspaceResource", writableLocalRoot.id, {
+          path: `${writableLocalRoot.path}/result.txt`,
+          threadId: "thread-1",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "COMMAND_DENIED" });
+  });
+
   it.skipIf(process.platform === "win32")(
     "invalidates an already registered conversation resource after thread cleanup",
     async () => {
@@ -591,6 +677,34 @@ describe("WorkspaceResourceController", () => {
 
     await expect(controller.captureEditorContext("selection")).rejects.toMatchObject({
       code: "COMMAND_DENIED",
+    });
+    await expect(
+      controller.execute(request("resolveEditorContext", remoteRoot.id, {})),
+    ).resolves.toBeNull();
+  });
+
+  it("skips an active editor in another remote project without blocking a turn", async () => {
+    mock.activeTextEditor = {
+      document: {
+        getText: () => "OTHER_REMOTE_PROJECT",
+        languageId: "plaintext",
+        uri: vscode.Uri.parse(
+          "vscode-remote://ssh-remote%2Btest_40/home/zkbot/work/other/context.txt",
+        ),
+      },
+      selection: {
+        end: { character: 0, line: 0 },
+        isEmpty: true,
+        start: { character: 0, line: 0 },
+      },
+    } as unknown as vscodeTypes.TextEditor;
+    const controller = new WorkspaceResourceController(
+      () => config([remoteRoot, remoteHomeRoot]),
+      () => undefined,
+    );
+
+    await expect(controller.captureEditorContext("file")).rejects.toMatchObject({
+      code: "PATH_OUTSIDE_ROOT",
     });
     await expect(
       controller.execute(request("resolveEditorContext", remoteRoot.id, {})),

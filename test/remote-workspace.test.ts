@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchesRemoteWorkspaceRoot } from "../src/remote-extension/workspace.js";
+import { matchesRemoteWorkspaceRoot, remoteExecutionRoot } from "../src/remote-extension/workspace.js";
 
 describe("Remote Executor workspace identity", () => {
   it("accepts the remote host file URI for the exact requested root", () => {
@@ -45,5 +45,20 @@ describe("Remote Executor workspace identity", () => {
         "/root/work/train/MimicLite",
       ),
     ).toBe(false);
+  });
+
+  it("allows only the remote account home as an alternate execution scope", () => {
+    expect(remoteExecutionRoot("/home/user/project", undefined, "/home/user")).toBe(
+      "/home/user/project",
+    );
+    expect(remoteExecutionRoot("/home/user/project", "/home/user", "/home/user")).toBe(
+      "/home/user",
+    );
+    expect(() =>
+      remoteExecutionRoot("/home/user/project", "/home/other", "/home/user"),
+    ).toThrow("does not match");
+    expect(() =>
+      remoteExecutionRoot("/home/user/project", "/", "/"),
+    ).toThrow("does not match");
   });
 });

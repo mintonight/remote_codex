@@ -1,6 +1,28 @@
 # 统一人工补测清单
 
-更新日期：2026-08-02
+更新日期：2026-09-22
+
+## 0.3.88 桌面启动恢复待验收
+
+- 2026-09-22 用户明确反馈桌面端已无问题；单次恢复可用已确认，不替代以下重复启动
+  和详细命令显示的专项验收。
+- 连续 3 次重开：记录 initialize 耗时和 desktop shared_attached，复用原共享服务和
+  native PID，不再发生 20 秒启动超时，不产生第二个 native writer。
+- 启动恢复后用户明确要求详细显示命令，已重新启用 STEPS_COMMANDS。确认具体命令
+  条目、展开输出、完成后保留和手动重开后设置生效；不把配置解析成功、只读探针或
+  进程存在当作界面验收。回退为 STEPS_PROSE 只是故障隔离步骤，不是最终方案。
+- VS Code 原安装仍为 0.3.87，同样报 Local service did not become ready；现已安装
+  同一已验证 0.3.88 Linux Controller VSIX，安装版本和 Shim 哈希均核对通过。
+  已观察到两个窗口手动 Reload Window 后使用新 Shim，初始化、会话列表及 thread/start
+  成功，并保留原共享服务/native PID。面板操作、正式 turn/start 和任务完成仍待验收。
+  不自动重载 VS Code/Remote SSH，不启动新的 SSH 认证；集成修复提交前仍须补齐
+  真实 VS Code/Remote SSH 任务和远端操作审计。
+- Windows 原生构建、Controller VSIX、实机运行及完整发布门禁均待补测。
+
+故障与候选证据：acceptance/2026-09-22-release-0.3.88-desktop-identity-recovery.md。
+详细显示重新启用记录：acceptance/2026-09-22-desktop-command-display-reenabled.md。
+VS Code 更新记录：acceptance/2026-09-22-vscode-0.3.88-install.md。
+两窗口重载结果：acceptance/2026-09-22-vscode-0.3.88-reload.md。
 
 ## 执行约定
 
@@ -330,7 +352,18 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M01 候选安装与官方任务
 
+- `0.3.90` 活动编辑器越界回归：Linux `igh_test` Remote SSH 窗口已重载，
+  04:44 UTC 新任务首条消息和远端项目操作通过；当前项目内自动上下文 04:54 UTC
+  已成功附加。仍需实机显式越界拒绝、完整发布指标及 Windows x64 原生验证。详见
+  acceptance/2026-09-23-release-0.3.90-editor-context-outside-root.md。
+
 - 安装最终 Linux x64 Controller VSIX，确认 Remote Executor 自动升级到候选要求版本。
+- 已完成（2026-08-27，用户实机确认 + 日志/审计复核）：`0.3.78` 安装后在
+  `data:/home/zkbot` 首次激活，于 `23:47:08.919` 记录
+  `app_server.session_bootstrap_reload` 并自动重载；新 Extension Host 于
+  `23:47:11.755` 激活，配置化 Shim 于 `23:47:18.814` 启动，Bridge 于
+  `23:47:19.264` 到达 `ready`。从首轮激活到 ready 为约 12.32 秒，自动重载恰好一次；
+  第二代际在 Shim 尚未完成启动时识别相同指纹并拒绝再次重载，随后由心跳正常转为 ready。
 - 冷启动和热启动各 3 次，记录到达 `ready` 的 P50、最大值及失败数。
 - 从官方 Codex 面板分别新建和恢复任务各 3 次，确认无 `Unknown local project`。
 - 确认任务进入当前 Shim，`initialize`、`thread/list`、`thread/start` 和
@@ -339,10 +372,57 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M02 项目根、附件与 Core 本地诱饵
 
+- `0.3.89` 远端用户目录与同 SSH authority 跨工作区拖放：Linux x64 候选已安装，
+  用户确认双向文件/目录拖入及任务读取通过。日志确认两窗口 `0.3.89` Shim、
+  Executor `0.2.22` 与 Codex 初始化，`x2_deploy` 接收另一个远端工作区目录，
+  远端文件附件成功，官方 `thread/start`、`turn/start` 进入 Shim，且
+  `remote-home-access` 的 `workspace_list_tree`、`workspace_read_file` 在远端成功。
+  反向接收、home 根显式命令、home 外与不同 authority 拒绝尚缺独立实机记录；
+  重连短暂 `ENOPRO` 和一次连接未建立需区分过渡与持续故障。仅路径而无同
+  authority URI 的跨工作区拖入应失败关闭。详见
+  acceptance/2026-09-22-release-0.3.89-remote-home-cross-workspace.md。
+
+- 2026-09-22 远程拖放复发：两端当前补丁/备份校验通过，且与当前生成器结果一致；
+  window7 最后激活早于 Webview 补丁写入，尚无后续重载或拖放捕获记录。请用户在
+  对应 Remote SSH 窗口手动重载，重连后核对唯一 @、完整捕获序列、remote=1 和
+  turn 实际远程读取，再回归文件/目录及再次重载。55 项定向测试通过不代表实机
+  恢复；window5 的本机目录成功记录不得用于远程验收。详见
+  acceptance/2026-09-22-remote-drop-recheck.md。
+
+- 0.3.87 握手修复：两端补丁和新 Bridge 均安装后手动重载，双来源文件/目录各 3 次。
+  当前已安装 0.3.87、实际应用两端补丁，原件/补丁/product checksum 均核验通过；
+  完整检查 490 passed / 7 skipped，安装后定向 55 passed。尚未代替用户重载窗口。
+  额外验证初次拖入、停留超过 2 秒后放下、侧栏隐藏再显示；禁用接收端时原生拖放不能
+  被补丁抢走。安装失败应允许再次启用，用户明确拒绝则不重复弹窗。静态及定向测试
+  不能替代这一组真实 UI 验收。
+
+- 2026-09-17：VS Code 升级为 1.138.0 后，Workbench 为未打补丁的官方资产，而 Codex
+  26.5908.31748 的引用补丁仍匹配受管哈希。需完成启用确认/系统授权/重载，再执行
+  Explorer 与系统文件管理器的文件/目录各 3 次拖入、唯一 @、turn 读取与再次重载。
+  35 项定向测试通过不等于拖放已经恢复；详见 acceptance/2026-09-17-drop-upgrade-recheck.md。
+
+- 待恢复与补测（2026-09-08）：用户确认 Explorer 与系统文件管理器拖放均完全无响应。
+  当前 VS Code `1.136.1` 的 Workbench 没有受管补丁，原厂 product checksum 匹配；
+  官方扩展 `26.5901.22334` 的 Webview 补丁及备份 SHA-256 匹配。最新激活记录另有
+  Workbench 兼容检查锁超时。现有补丁能够匹配当前两端资产并生成语法有效的 JavaScript，
+  但这不证明实机恢复。先通过 `Codex Bridge: Enable Native Codex Drop Surface`
+  重新启用，由用户完成系统授权及窗口重载，再分别从 Explorer、系统文件管理器拖入
+  文件和目录各至少 3 次，核对完整捕获序列、唯一原生 `@`、turn 可读取和再次重载回归。
+  单独验证仅含 `data:` URI 的图片拖放是否应交回官方入口，并确认日志不记录图片载荷；
+  它在升级前已有拒绝记录，不能归因为本次 VS Code 升级。证据见
+  [本次升级复核](acceptance/2026-09-08-release-0.3.79-drop-recheck.md)。
+
+- 待修复（2026-08-31）：VS Code `1.135.0`、官方扩展 `26.5825.51511`、Bridge
+  `0.3.79` 的本地窗口重载后，用户确认拖放添加再次失效。Bridge 激活日志显示
+  `layout.integration result=already-repaired`，但拖动时没有新增
+  `phase.workbench.drop.begin`，说明故障位于 Workbench 捕获入口之前，不能用既有补丁元数据
+  或历史验收推断当前资产仍可用。需重新采集 Explorer 与系统文件管理器的拖动信号、当前
+  Workbench/Webview 校验和及实际事件序列，修复后连续 3 轮拖入并再次重载回归。
 - 在官方 UI 新建和恢复任务中确认远程主根显示正确，本地控制目录不显示为项目根。
 - 已完成（2026-08-10，用户实机确认）：Bridge 捕获的本地与 Remote SSH 拖放已统一为
   当前 Composer 光标处的原生 `@`；VS Code Explorer、系统文件管理器、文件和目录不再
-  因来源不同切换到附件表示。Remote SSH 中的本机资源可经本地次级根授权后继续分析。
+  因来源不同切换到附件表示。Remote SSH 中的本机拖入资源按当前 thread 形成独立只读
+  conversation resource，不会获得本机可写根权限。
   本轮未重新采集禁用恢复字节校验和版本升级回归，二者继续保留为发布门禁。
 - 已完成（2026-08-09，用户实机确认）：Linux 本地窗口中的 Explorer 与系统文件管理器
   拖放已能直接进入 Codex 对话区域，不再要求先经过其他 Workbench 区域；本地拖放功能
@@ -386,41 +466,64 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
   和目录子树；读取相邻文件、写入、Git 状态及在另一个对话复用同一 ID 均必须失败关闭。
   删除对话后应出现 `conversation_resource.delete_thread` 且计数下降。禁用拖放接收面后
   不再暂存新资源，Workbench 与 Webview 仍需完成逐字节恢复验证。
-- 在本地控制目录和本地授权根放置同名诱饵，要求模型读取、修改、搜索和执行项目命令；
-  Remote SSH 任务中的本地 Core Shell/文件/Git 操作数必须为 0。
-- 覆盖已知客户端请求阻断、Core 审批阻断和专用模型工具路径；失败结果必须进入审计。
+- 待验证（2026-08-13，`0.3.76`）：VS Code `1.133.0` 与
+  `openai.chatgpt@26.5810.41047` 升级后，旧版 Workbench 和 Webview 托管元数据曾分别
+  记录 `conflict`，统一 `@` 拖放因而未加载。安装候选后应只对该新资产组合确认一次，
+  首轮自动引导已进入 Webview `patched`，但 GNOME Shell 在 VS Code 模态框刚关闭时无法
+  显示 polkit 对话框，以 `Request dismissed` 结束；Bridge 已恢复 Webview 和暂存状态，
+  系统 Workbench / `product.json` 哈希保持升级后的原值。加入 500 ms modal-grab 释放等待
+  后，需从命令面板手动重试启用，完成 polkit 和自动重载；Bridge 输出应记录两个新资产为
+  `patched` / `already-patched`，
+  不再出现 onboarding skipped conflict。随后在普通本地窗口和真实 Remote SSH 窗口分别
+  从 Explorer 与系统文件管理器拖入文件、目录，确认当前光标只生成一个原生 `@` 且 turn
+  能读取；最后执行禁用并以 SHA-256 核对 VS Code Workbench、`product.json` 和官方
+  Webview 与本轮新版本原始备份逐字节一致。
+- 待验证（2026-08-25，`0.3.77`）：安装后仅重载 Remote SSH `/root/Bote_Teleopit` 窗口，
+  不执行任何目录选择或授权命令。诊断应直接出现 `localExecution="allow"`、
+  `local-full-access` 和 `fullLocalAccess.accessible=true`。新对话应能直接读写
+  `/home/zkbot/work/train/Teleopit`、执行本机命令，并把预期 34 个远端文件下载到该目录，
+  逐项核对相对路径、大小与 SHA-256；同时用 `pwd` 和远端 Git/读取操作确认 `remote_exec`
+  及远端 `workspace_*` 仍落在 `/root/Bote_Teleopit`。首轮实测在完全访问 UI 下仍出现一次
+  `remote_exec` 允许提示，审计为 `automatic=false, decision=accept`；修复候选重载后须确认
+  本机 Core、远端命令、后台任务和工作区覆盖均不再显示授权提示，相应审计为
+  `automatic=true, permissionMode="full-access"`。记录本机最大权限已明确接受，不再执行根外
+  拒绝、撤销、Core 阻断或本机诱饵为零的旧门禁。
+- 覆盖本机 Core 文件、命令、进程和五类审批请求自动接受，确认不再出现
+  `local_core_request.blocked`、`local_core_approval.blocked` 或任何确认卡片；审计应出现
+  `local_core_approval.auto_accepted` 且不记录命令或路径正文。
 - 恢复普通本地任务，确认上述限制没有污染本地窗口的正常项目操作。
 
 ### M03 远程主根与对话资源只读路由
 
 - 确认 Remote SSH 配置和 `runtimeWorkspaceRoots` 始终只有一个远端项目主根。
-- 同一任务交替读取远端主根与当前对话明确拖入的本机文件/目录；本机资源只允许读取、
-  目录树和字面搜索，不允许 Git 或修改。
-- 新建另一个对话确认不继承资源；删除原对话后既有 conversation resource ID 立即失效。
+- 同一任务交替读取远端主根、`local-full-access` 和当前对话拖入资源；专用 conversation
+  resource ID 仍保持按 thread 只读并在删除后失效，但不得把它宣称为本机安全隔离边界。
 - 固定远端读取、目录树、搜索、Git 和 `pwd` 各执行至少 5 次，成功率必须为 100%。
 - 审计中的目标端、根 ID、角色、规范化路径和 `remoteCwd` 必须与实际执行端一致。
 
 ### M04 远端安全写入
 
-- 在远程工作区执行写入、补丁、建目录、重命名和删除；对话本机资源的同类操作全部拒绝。
+- 在远程工作区执行写入、补丁、建目录、重命名和删除；conversation resource ID 的同类
+  操作仍拒绝，但本机 Core 和 `local-full-access` 允许修改相同绝对路径。
 - 使用过期 `expectedHash` 至少 5 次，必须全部返回 `FILE_CONFLICT` 且原文件不变。
 - 验证原子替换、权限错误、目标已存在、部分失败和单次写入上限；不得留下临时半写文件。
-- 非完全访问模式逐项核对重要操作审批；`full-access` 自动放行但仍有审批结果审计。
+- 重要操作不再显示审批；核对统一自动放行审计、哈希和幂等结果。
 - 远程断线、窗口重载和 Executor 失联时写入必须失败关闭，不得切换到 OpenSSH 或本地。
 
 ### M05 远程资源、Diff 与跳转
 
 - 从 Bridge 工具结果打开远程文件，确认使用当前 Remote SSH URI 且没有合成工作区根。
 - 检查本地/远程同名文件的打开、定位、行号跳转和 Diff 左右端身份。
-- 对已撤销根、越界路径、已关闭窗口和过期资源执行打开/Diff，必须明确失败。
+- 对已关闭窗口和过期 conversation resource 执行打开/Diff，必须明确失败；
+  `local-full-access` 不存在可撤销或根外路径。
 - 在官方 UI 中确认命令项、文件名、目标端、路径和错误提示没有混淆。
 
-### M06 远程命令审批与运行中取消
+### M06 远程命令自动执行与运行中取消
 
-- 在 `full-access` 和至少一种需审批模式下分别执行远程命令，核对权限继承和审批内容。
+- 在 UI 显示完全访问和历史 thread 曾为需审批模式两种条件下执行远程命令，均不得弹出确认。
 - 从官方 UI 和附着 CLI 两个方向各取消长命令至少 3 次。
 - 每次记录 `turn/interrupt` 到 `CANCELLED` 的耗时，并确认远端完整进程树消失。
-- 等待审批时取消不得启动远端进程；取消确认失败必须返回 `RESULT_UNKNOWN`。
+- 取消活动远端进程并核对终态；不再保留等待审批场景。
 - OpenSSH 回退的取消限制必须清晰呈现，不得伪装成远端进程树已确认终止。
 
 ### M07 幂等、断线与结果确认
@@ -450,21 +553,102 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 ### M10 外部 CLI 与官方 UI 双向同 thread
 
+- 2026-08-29 Linux 现场诊断发现 `~/.local/bin/codex` 与
+  `~/.nvm/versions/node/v24.18.0/bin/codex` 同时存在。Bridge 的 v2
+  `integration.json` 只保留一个 `automaticLauncher`，多个本地 Extension Host 会随各自
+  `PATH` 在两者间反复迁移托管入口；本轮 NVM 入口因此绕过 Bridge，启动了两个独立 CLI
+  app-server。需增加多 POSIX launcher 测试与真实三表面共存验收。
+- 同轮官方 VS Code turn `01a04e50-74dc-73c1-9f5a-bd580885af8c` 于 07:39 正常
+  `task_complete`，但 07:42 窗口重载后旧 app-server PID `13215` 被用户级 systemd 收养，
+  新实例 PID `195170` 恢复同一 thread 时明确收到 `thread-store conflict: ... already has
+  an active writer`，UI 因而显示“已在另一个应用中打开”。现场精确终止 PID `13215` 后，
+  新实例的 `readyz`、`healthz` 均保持 200。`0.3.79` 候选增加 v3 app-server 进程身份和
+  新 Extension Host 的过期实例清理；需安装后重跑完整 turn、窗口重载、同 thread 恢复，
+  并确认独立 CLI/App 不被清理。
 - CLI 和官方 UI 两端各发起一次新 turn、steer 和取消，核对 thread/turn ID 与事件顺序。
 - 两端同时观察流式文本、工具状态、命令输出、终态和完整历史，确认无重复通知。
 - 覆盖 `expectedTurnId` 冲突、CLI 中途断开、网关重启、过期描述符和权限撤销。
-- 验证 `full-access` 不产生 Bridge 二次审批，其他模式不被外部 CLI 升权。
+- 验证所有外部客户端同样被固定为最大权限且不产生 Bridge 审批。
 - 插件升级后验证 `codex-vscode` 和普通 `codex` 托管入口迁移及重新附着。
-- CLI 项目写入必须复用同一目标端、根 ID、`expectedHash`、审批、幂等与审计链。
+- CLI 项目写入必须复用同一目标端、根 ID、`expectedHash`、幂等与审计链。
 
 ### M11 生命周期、设置恢复与安全扫描
 
+- 提交前复核：2026-09-11T05:06:39.672Z 的重启回执为 failed，原因是未在时限内
+  确认桌面/适配器；但 05:06:10.526Z 已有 desktop shared_attached 成功审计，目标
+  service 883494/native 189420。需核对检测与实际 UI 差异，不能把它当作已验收或
+  断言应用完全未启动。真实 Remote SSH 提交/推送门禁仍缺少本轮现场证据。
+
+- 0.3.86 常用桌面图标：核对 GIO 解析的是用户级 chatgpt.desktop，其 Exec 为共享
+  启动器；已备份的自定义入口卸载时逐字节恢复。用户已授权仅退出旧桌面主进程，
+  由独立助手执行并写 desktop-client/restart.json；仅 shared-client-ready 能表示
+  新桌面及 Shim 已启动且审计确认共享接入，不能把启动器退出码等同于 UI 验收。
+
+- 0.3.85：等待原桌面任务完成，用户退出旧桌面端并从 ChatGPT (Shared Codex) 新入口
+  启动；VS Code 手动重载。核对 client.shared_attached/client.callback_route，验证原
+  thread 回到同 native PID、双项目不会被错误过滤、桌面工具可用；双端轮流断开、
+  排队、追加、停止和待审批恢复均须验收。安装脚本不能代替这次首次重启。
+
+- 0.3.84 新现场：VS Code 已连接 service 883494/native 189420，但桌面端 native
+  326107 对同 thread/resume 返回 active writer。桌面跨客户端项仍失败，不能作为
+  已通过关闭。需完成桌面所有项目与 VS Code 的统一后台接入及首次有序迁移，再由
+  用户手动重启桌面端验收；详见 `acceptance/2026-09-10-local-service-desktop-writer-conflict.md`。
+
+- `0.3.84` 独立服务候选：由用户重载相关本地窗口，核对多个客户端对应同一个服务和
+  native PID。执行长任务时连续重载 3 次，非前台线程自动恢复订阅，后台不被取消；
+  第二客户端追加、停止、官方队列及接回审批均可用。记录前后台一致性、服务身份和
+  审计，验证慢客户端只断开自身。服务全退出、升级排空、Remote SSH transport
+  重绑定和 Windows 实机仍待补测；不能把离线二进制测试等同于 UI 或灰屏验收。
+
+- 21:59:38 再次灰屏，三个 renderer 转储均为同一 Build ID 和 `code+0x3f73f8c`。
+  当前 `0.3.83` 仍失败，后台原线程状态 active，暂不重载或终止。待用户确认后执行可
+  回滚的原版前端资产对照；不同时变更 GPU、版本和补丁。另核对缺失的恢复周期审计。
+  见 `acceptance/2026-09-08-recurrent-renderer-crash-comparison.md`。
+- `0.3.83` 覆盖官方扩展升级把旧运行时移动、删除后仍存活的场景。应选回原持有者
+  `105310`，新描述符含设备/inode 身份，不能再只接管空实例 `189420`。旧记录私有凭据、
+  argv 或 socket 所属验证失败时，不得猜测、终止进程或清除记录。需真实升级/重载验收。
+- `0.3.82` 修复真实窗口启动时未先读取工作区而漏接旧实例的问题。验收应在未继承
+  `CODEX_BRIDGE_LOCAL_WORKSPACE_ROOT` 的情况下，从当前 Extension Host 记录解析根，
+  再出现 `app_server.handoff`；不得先以启动器 home 目录 spawn 后才改成项目目录。
+  需验证“旧实例持有线程 + 新空实例”仍接管正确持有者，多个非空实例不猜测。
+- 用户明确灰屏常在展开命令及结果详情时触发，需采集该卡片对应的 item/turn、输出
+  大小和渲染样本；不要求用户再次触发崩溃来提供标题，当前尚未对详情渲染宣称修复。
+- `0.3.81` 预防性修正待验收：确认自动恢复不再出现 `includeTurns=true` 或合成的完整
+  线程快照，背景订阅使用 `excludeTurns=true`，不重复订阅前台会话。核对
+  `thread.recovery.cycle` 的真实周期计数、状态变更与无正文审计，并在同一长对话持续
+  生成期间观察 UI 和新 Crashpad 转储。不得以合成压力测试或自动重载代替灰屏根因修复。
+- 用户确认 `Developer: Reload Webviews` 无法恢复本次灰屏；没有新增 Codex 初始化或
+  崩溃转储。已记录 app-server `105310` 的完整窗口重载前基线，并请用户仅重载 Zklab
+  窗口；恢复与同进程接管结果待补测。见 `acceptance/2026-09-08-webview-reload-failed.md`。
+- 2026-09-08 18:19:36 灰屏现场已确认 renderer PID `104346` 原生崩溃，主窗口和
+  app-server 存活，原线程只读查询为 idle。已请用户执行 `Developer: Reload Webviews`
+  验证局部恢复，结果待补测；需匹配符号和受控对照后才能归因。见
+  `acceptance/2026-09-08-codex-webview-renderer-crash.md`。不要提交或上传原始转储。
+- 灰屏专项待复现：用户报告 Codex 经常灰屏，历史日志另有共享 Extension Host 无响应。
+  用户已确认仅右侧 Codex 区域受影响，目前不在灰屏状态。
+  记录灰屏的准确时间、影响范围及恢复方式，采集对应 renderer/Webview 错误和扩展宿主
+  性能样本后再归因；不能把 ResizeObserver 上报位置当作责任归属，或用后台进程健康
+  代替前台渲染验收。见 `acceptance/2026-09-08-codex-gray-screen-triage.md`。
+- 2026-09-08 首次用户重载复核：已运行 `0.3.80` Shim，原线程已加载为 idle，本次没有
+  writer conflict 或 recovery error；只有一个空闲线程且没有 handoff 审计，后台运行
+  保活尚未验收。前端启动时有 42 条 ResizeObserver 错误，需对照用户症状进一步定位。
+  见 `acceptance/2026-09-08-session-recovery-first-reload.md`。
+- `0.3.80` Linux 本地窗口候选：同时运行前台 A 和非前台 B，切换到另一个对话后重载，
+  连续 3 轮验证 B 自动重新出现并继续更新，两个线程 ID、后台 app-server PID 保持不变，
+  不出现 writer 冲突或重复 turn。另运行长对话，核对前台显示和后台最新项，验证 30 秒
+  快照校正、WS 心跳失败重连、输出堵塞恢复及完成态补齐。截图或旧日志不替代本轮操作。
+- 关闭窗口后保留后台运行任务；接管期后重开窗口，确认仅回收可验证空闲实例。
+  独立 ChatGPT App/CLI、其他工作区和已由新 Shim 接管的实例不得被清理；实际状态未知
+  时不得假设空闲。所有 VS Code 窗口均关闭期间不声称 Controller 定时维护仍在运行。
+- Remote SSH 的 app-server 保活接管目前未开启，需先验证重载后动态工具及 MCP
+  transport 重绑；Windows 需要原生进程身份/接管实现和独立实机验收。
 - 覆盖旧 Shim/Executor 迁移、必要重载、独立停止、恢复驱动停止和重新启用。
 - 分别执行客户端断开、Controller 停止、relay 断开、窗口关闭和 Extension Host 退出。
 - 每种关闭方式核对 Shim、relay、MCP、后台任务和远端命令遗留进程数。
 - 对比升级前后 `chatgpt.cliExecutable` 与 `remote.extensionKind`，恢复后差异必须为 0。
 - 扫描日志、审计、进程参数、MCP 配置、远端环境和仓库，敏感信息命中数必须为 0。
-- 确认远端 `codex`/app-server 进程数为 0，错误本地项目操作数为 0。
+- 确认远端 `codex`/app-server 进程数为 0；本机操作须与用户请求一致，不再要求本机项目
+  操作总数为 0。
 
 ## B. OpenSSH 回退
 
@@ -472,7 +656,8 @@ OpenSSH 和已关闭的故障矩阵不得由既有 Linux 子链推断为通过�
 
 - 仅在用户显式选择 `openssh` 后建立连接，验证严格主机密钥、user、port 和
   IdentityFile 路径边界。
-- 验证远端读、搜、Git、受审批命令和支持的写入操作；本地次级根必须失败关闭。
+- 验证远端读、搜、Git、自动执行命令和支持的写入操作；OpenSSH 不暴露结构化
+  `local-full-access` 根，但本机 Core 最大权限仍保持可用。
 - 验证远端 MCP stdio 控制头与适配器，不复制本机环境或凭据。
 - Linux 核对 ControlMaster 建立、复用、`-O exit` 和 socket 清理。
 - 单独记录取消、断线和结果未知限制，不得套用 VS Code Remote 的账本声明。

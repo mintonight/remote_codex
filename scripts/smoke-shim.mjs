@@ -15,6 +15,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { findOfficialCodexRuntime } from "./official-codex.mjs";
+import { stopSmokeAppServers } from "./cleanup-smoke-app-servers.mjs";
 
 const officialRuntime = await findOfficialCodexRuntime();
 const bundledCodexVersion = execFileSync(
@@ -50,6 +51,9 @@ function appServerEnvironment(stateDir, codexHome, sessionConfigPath = null) {
 
 async function writeRuntimeMetadata(stateDir) {
   await mkdir(stateDir, { mode: 0o700, recursive: true });
+  await mkdir(join(stateDir, "local-workspaces"), { mode: 0o700, recursive: true });
+  await writeFile(join(stateDir, "local-workspaces", `${process.pid}.json`),
+    JSON.stringify({ version: 1, workspaceRoot: process.cwd() }), { mode: 0o600 });
   await writeFile(
     join(stateDir, "official-codex-runtime.json"),
     `${JSON.stringify({
@@ -186,7 +190,8 @@ async function runHandshake(
 
 async function assertExternalCliAttach(stateDir, threadId, shimPid = null) {
   const externalCliDir = join(stateDir, "external-cli");
-  let descriptorPath = shimPid === null
+  const independentService = process.platform === "linux" && shimPid !== null;
+  let descriptorPath = shimPid === null || independentService
     ? null
     : join(externalCliDir, `${shimPid}.json`);
   const descriptorDeadline = Date.now() + 10_000;
@@ -215,6 +220,9 @@ async function assertExternalCliAttach(stateDir, threadId, shimPid = null) {
   }
   if (typeof descriptor?.endpoint !== "string" || typeof descriptor?.tokenPath !== "string") {
     throw new Error("Shared app-server did not publish the External CLI gateway descriptor");
+  }
+  if (independentService && (descriptor.pid === shimPid || !descriptor.serviceKey)) {
+    throw new Error("Local window still owns its app-server instead of attaching to an independent service");
   }
   const token = await readFile(descriptor.tokenPath, "utf8");
   const socket = new WebSocket(descriptor.endpoint, {
@@ -267,13 +275,16 @@ async function assertExternalCliAttach(stateDir, threadId, shimPid = null) {
   }
   const threadDeadline = Date.now() + 10_000;
   let publishedDescriptor = descriptor;
-  while (publishedDescriptor?.threadId !== threadId && Date.now() < threadDeadline) {
+  const containsThread = (entry) => entry?.serviceKey
+    ? entry.loadedThreadIds?.includes(threadId)
+    : entry?.threadId === threadId;
+  while (!containsThread(publishedDescriptor) && Date.now() < threadDeadline) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     publishedDescriptor = await readFile(descriptorPath, "utf8")
       .then((raw) => JSON.parse(raw))
       .catch(() => null);
   }
-  if (publishedDescriptor?.threadId !== threadId) {
+  if (!containsThread(publishedDescriptor)) {
     throw new Error(
       `Shared app-server did not publish the active VS Code thread: ${JSON.stringify(publishedDescriptor)}`,
     );
@@ -569,7 +580,7 @@ function assertThreadStarted({ messages, stdout }) {
     threadStart.result.sandbox?.type !== "dangerFullAccess"
   ) {
     throw new Error(
-      `Remote local-deny policy was not projected as official full access: ${stdout}`,
+      `Remote maximum local access was not reported as official full access: ${stdout}`,
     );
   }
 }
@@ -690,14 +701,11 @@ try {
   const auditedAppServerArgs = shimStart?.details?.appServerArgs;
   if (
     !Array.isArray(auditedAppServerArgs) ||
-    !auditedAppServerArgs.some((arg) => arg.startsWith("default_permissions=")) ||
-    !auditedAppServerArgs.some((arg) =>
-      arg.endsWith('filesystem={":root"="deny",":minimal"="read"}'),
-    ) ||
-    !auditedAppServerArgs.some((arg) => arg.endsWith("network.enabled=false"))
+    auditedAppServerArgs.some((arg) => arg.startsWith("default_permissions=")) ||
+    auditedAppServerArgs.some((arg) => arg.includes('filesystem={":root"="deny"'))
   ) {
     throw new Error(
-      `Remote local-deny permission profile is missing from app-server args: ${JSON.stringify(
+      `Remote app-server unexpectedly received a local-deny permission profile: ${JSON.stringify(
         shimStart?.details?.appServerArgs,
       )}`,
     );
@@ -765,6 +773,7 @@ try {
     "Shim smoke test passed: missing metadata fails closed, automatic plain CLI attach, stable official launcher routing, external MCP tools, shared local and remote app-server startup, thread creation and authenticated external gateway connection\n",
   );
 } finally {
+  await stopSmokeAppServers(rootDir);
   await rm(rootDir, {
     force: true,
     maxRetries: process.platform === "win32" ? 20 : 0,

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { parseBridgeConfig } from "../src/core/config.js";
 import type { ConversationResourceConfig } from "../src/core/types.js";
 import { REMOTE_DYNAMIC_TOOLS } from "../src/shim/dynamic-tools.js";
-import { REMOTE_PERMISSION_PROFILE_ID } from "../src/shim/local-core-policy.js";
 import { isUnknownServerRequest } from "../src/shim/proxy.js";
 import { createToolRouteInventory } from "../src/shim/tool-routing.js";
 import {
@@ -40,6 +39,32 @@ const remoteCodegraphRoutes = createToolRouteInventory(config, {
 });
 
 describe("app-server request rewriting", () => {
+  it("advertises remote home access only when that root is configured", () => {
+    const message = { id: 1, method: "thread/start", params: {} };
+    const withoutHome = rewriteClientMessage(message, config, "/local/control") as {
+      params: { developerInstructions: string };
+    };
+    const withHome = rewriteClientMessage(
+      message,
+      parseBridgeConfig({
+        ...config,
+        roots: [
+          ...config.roots,
+          {
+            id: "remote-home-access", target: "remote", role: "secondary",
+            path: "/home/zkbot", displayName: "Remote user home",
+          },
+        ],
+      }),
+      "/local/control",
+    ) as { params: { developerInstructions: string } };
+
+    expect(withoutHome.params.developerInstructions).not.toContain("remote-home-access");
+    expect(withHome.params.developerInstructions).toContain(
+      'Select target="remote" and rootId="remote-home-access"',
+    );
+  });
+
   it("scopes the official local task list to the open workspace", () => {
     const message = {
       id: 0,
@@ -109,12 +134,12 @@ describe("app-server request rewriting", () => {
     expect(rewritten.params.runtimeWorkspaceRoots).toEqual([
       "/home/zkbot/work/train/MimicLite",
     ]);
-    expect(rewritten.params.permissions).toBe(REMOTE_PERMISSION_PROFILE_ID);
+    expect(rewritten.params.permissions).toBe(":danger-full-access");
     expect(rewritten.params.approvalPolicy).toBe("never");
     expect(rewritten.params).not.toHaveProperty("config");
     expect(rewritten.params).not.toHaveProperty("sandbox");
     expect(String(rewritten.params.developerInstructions)).toContain(
-      "Never fall back to unapproved local execution",
+      "local host is available with the maximum filesystem and process permissions",
     );
     expect(String(rewritten.params.developerInstructions)).toContain(
       "Local MCP, app, connector, and web tools may be used",
@@ -215,7 +240,7 @@ describe("app-server request rewriting", () => {
     }
   });
 
-  it("maps an external full-access sandbox request to the remote permission profile", () => {
+  it("keeps maximum local access while removing legacy sandbox fields", () => {
     const rewritten = rewriteClientMessage(
       {
         id: 3,
@@ -230,12 +255,12 @@ describe("app-server request rewriting", () => {
       null,
     ) as { params: Record<string, unknown> };
 
-    expect(rewritten.params.permissions).toBe(REMOTE_PERMISSION_PROFILE_ID);
+    expect(rewritten.params.permissions).toBe(":danger-full-access");
     expect(rewritten.params.approvalPolicy).toBe("never");
     expect(rewritten.params).not.toHaveProperty("sandbox");
   });
 
-  it("forces the local-deny permission profile when resuming", () => {
+  it("forces full local access when resuming", () => {
     const rewritten = rewriteClientMessage(
       {
         id: 3,
@@ -255,7 +280,7 @@ describe("app-server request rewriting", () => {
     expect(rewritten.params).toMatchObject({
       cwd: "/local/control",
       runtimeWorkspaceRoots: ["/home/zkbot/work/train/MimicLite"],
-      permissions: REMOTE_PERMISSION_PROFILE_ID,
+      permissions: ":danger-full-access",
       approvalPolicy: "never",
     });
     expect(rewritten.params).not.toHaveProperty("config");
@@ -300,7 +325,7 @@ describe("app-server request rewriting", () => {
     expect(rewritten.params).toMatchObject({
       approvalPolicy: "never",
       cwd: "/local/control",
-      permissions: REMOTE_PERMISSION_PROFILE_ID,
+      permissions: ":danger-full-access",
       runtimeWorkspaceRoots: ["/home/zkbot/work/train/MimicLite"],
       additionalContext: {
         official: {
@@ -399,7 +424,7 @@ describe("app-server request rewriting", () => {
     expect(editorContext.value).toContain(JSON.stringify(content));
   });
 
-  it("prevents settings updates and forks from relaxing the local-deny policy", () => {
+  it("keeps full local access across settings updates and forks", () => {
     const settings = rewriteClientMessage(
       {
         id: 5,
@@ -418,7 +443,7 @@ describe("app-server request rewriting", () => {
       threadId: "thread_123",
       cwd: "/local/control",
       approvalPolicy: "never",
-      permissions: REMOTE_PERMISSION_PROFILE_ID,
+      permissions: ":danger-full-access",
     });
     expect(settings.params).not.toHaveProperty("sandboxPolicy");
 
@@ -442,12 +467,12 @@ describe("app-server request rewriting", () => {
       threadId: "thread_123",
       cwd: "/local/control",
       approvalPolicy: "never",
-      permissions: REMOTE_PERMISSION_PROFILE_ID,
+      permissions: ":danger-full-access",
       runtimeWorkspaceRoots: ["/home/zkbot/work/train/MimicLite"],
     });
     expect(String(fork.params.developerInstructions)).toContain("keep me");
     expect(String(fork.params.developerInstructions)).toContain(
-      "Never fall back to unapproved local execution",
+      "local host is available with the maximum filesystem and process permissions",
     );
     expect(fork.params).not.toHaveProperty("config");
     expect(fork.params).not.toHaveProperty("sandbox");
