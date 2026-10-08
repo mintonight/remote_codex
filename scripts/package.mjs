@@ -69,6 +69,7 @@ for (const target of targets) {
   await createVSIX({
     allowMissingRepository: true,
     cwd: process.cwd(),
+    rewriteRelativeLinks: false,
     dependencies: false,
     ignoreFile: resolve(`.vscodeignore.${target}`),
     packagePath,
